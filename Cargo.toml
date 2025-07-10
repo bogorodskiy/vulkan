@@ -10,6 +10,7 @@ tracing-subscriber = "0.3.19"
 winit = "0.30.11"
 anyhow = "1.0.98"
 nalgebra = "0.33.2"
+memoffset = "0.9.1"
 
 [profile.dev]
 opt-level = 0   # No optimizations (default for dev)

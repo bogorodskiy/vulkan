@@ -1,4 +1,5 @@
-﻿mod queue_family;
+﻿mod mesh;
+mod queue_family;
 mod swapchain;
 mod vertex;
 mod vulkan_device;
@@ -6,6 +7,7 @@ mod vulkan_device;
 use anyhow::Result;
 use ash::vk;
 use ash::vk::MAX_EXTENSION_NAME_SIZE;
+use nalgebra as na;
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::io;
@@ -22,6 +24,7 @@ const SHADERS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/shaders/");
 const MAX_FRAME_DRAWS: usize = 2;
 
 pub struct VulkanRenderer {
+    // Vulkan components
     instance: ash::Instance,
     window: Arc<Window>,
     entry: ash::Entry, // entry is required, otherwise it will be dropped before we destroy the instance
@@ -57,6 +60,9 @@ pub struct VulkanRenderer {
 
     // Pools
     graphics_command_pool: vk::CommandPool,
+
+    // Scene objects
+    first_mesh: mesh::Mesh,
 }
 
 impl VulkanRenderer {
@@ -101,6 +107,7 @@ impl VulkanRenderer {
                     swapchain_device: None,
                 },
                 current_frame: 0,
+                first_mesh: mesh::Mesh::default(),
                 graphics_queue: Default::default(),
                 presentation_queue: Default::default(),
                 surface_extension: surface_extension,
@@ -127,6 +134,7 @@ impl VulkanRenderer {
             result.queue_family_indices =
                 result.get_queue_family_indices(result.main_device.physical_device)?;
             result.create_and_set_logical_device()?;
+            result.create_scene_objects()?;
             result.create_and_set_swapchain_device()?;
             result.create_and_set_swapchain()?;
             result.create_render_pass()?;
@@ -406,6 +414,31 @@ impl VulkanRenderer {
         }
     }
 
+    fn create_scene_objects(&mut self) -> Result<()> {
+        let point_1 = na::Vector3::new(0.0, -0.4, 0.0);
+        let point_2 = na::Vector3::new(0.4, 0.4, 0.0);
+        let point_3 = na::Vector3::new(-0.4, 0.4, 0.0);
+
+        let color_1 = na::Vector3::new(1.0, 0.0, 0.0);
+        let color_2 = na::Vector3::new(0.0, 1.0, 0.0);
+        let color_3 = na::Vector3::new(0.0, 0.0, 1.0);
+
+        let vertices: Vec<vertex::Vertex> = vec![
+            vertex::Vertex::new(point_1, color_1),
+            vertex::Vertex::new(point_2, color_2),
+            vertex::Vertex::new(point_3, color_3),
+        ];
+
+        self.first_mesh = mesh::Mesh::new(
+            self.main_device.get_logical_device(),
+            self.main_device.physical_device,
+            &self.instance,
+            vertices.as_slice(),
+        )?;
+
+        Ok(())
+    }
+
     fn create_and_set_swapchain_device(&mut self) -> Result<()> {
         let swapchain_device =
             ash::khr::swapchain::Device::new(&self.instance, self.main_device.get_logical_device());
@@ -576,6 +609,29 @@ impl VulkanRenderer {
         // See VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR
         // VkPipelineDynamicStateCreateInfo
 
+        let binding_description = vk::VertexInputBindingDescription::default()
+            .binding(0) // can bind multiple streams of data, this defines which one
+            .stride(size_of::<vertex::Vertex>() as u32) // size of a single vertex object
+            .input_rate(vk::VertexInputRate::VERTEX); // How to move between data after each vertex object
+                                                      //     vk::VertexInputRate::VERTEX - move on to the next vertex
+                                                      //     vk::VertexInputRate::INSTANCE - move to a vertex for the next instance
+
+        // How the data for an attribute is defined within a vertex
+        let attribute_descriptions = [
+            // POSITION
+            vk::VertexInputAttributeDescription::default()
+                .binding(0) // which binding the data is at (should be the same as above)
+                .location(0) // location where data will be read from
+                .format(vk::Format::R32G32B32_SFLOAT) // format data will take (also helps define the size of data)
+                .offset(memoffset::offset_of!(vertex::Vertex, position) as u32),
+            // COLOR
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(1)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(memoffset::offset_of!(vertex::Vertex, color) as u32),
+        ];
+
         let logical_device = self.main_device.get_logical_device();
         unsafe {
             self.pipeline_layout = logical_device
@@ -586,7 +642,11 @@ impl VulkanRenderer {
                     vk::PipelineCache::default(),
                     &[vk::GraphicsPipelineCreateInfo::default()
                         .stages(&[vertex_stage_create_info, fragment_stage_create_info])
-                        .vertex_input_state(&vk::PipelineVertexInputStateCreateInfo::default())
+                        .vertex_input_state(
+                            &vk::PipelineVertexInputStateCreateInfo::default()
+                                .vertex_binding_descriptions(&[binding_description])
+                                .vertex_attribute_descriptions(&attribute_descriptions),
+                        )
                         .input_assembly_state(
                             &vk::PipelineInputAssemblyStateCreateInfo::default()
                                 .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
@@ -645,6 +705,7 @@ impl VulkanRenderer {
                         .layout(self.pipeline_layout)
                         .render_pass(self.render_pass)
                         .subpass(0)],
+                    // End of GraphicsPipelineCreateInfo
                     None,
                 )
                 .unwrap()
@@ -704,7 +765,7 @@ impl VulkanRenderer {
                 .allocate_command_buffers(
                     &vk::CommandBufferAllocateInfo::default()
                         .command_pool(self.graphics_command_pool)
-                        .level(vk::CommandBufferLevel::PRIMARY) // Buffer you submit directly to queue, cannot be call by other buffers
+                        .level(vk::CommandBufferLevel::PRIMARY) // Buffer you submit directly to queue, cannot be called by other buffers
                         .command_buffer_count(self.swapchain_framebuffers.len() as u32),
                 )?;
         }
@@ -907,8 +968,23 @@ impl VulkanRenderer {
                     self.graphics_pipeline,
                 );
 
+                let vertex_buffers = [self.first_mesh.get_vertex_buffer()]; // buffer to bind
+                let vertex_buffers_offsets = [0 as vk::DeviceSize]; // offsets into buffers being bound
+                logical_device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &vertex_buffers,
+                    &vertex_buffers_offsets,
+                );
+
                 // Execute pipeline
-                logical_device.cmd_draw(command_buffer, 3, 1, 0, 0);
+                logical_device.cmd_draw(
+                    command_buffer,
+                    self.first_mesh.get_vertex_count(),
+                    1,
+                    0,
+                    0,
+                );
 
                 logical_device.cmd_end_render_pass(command_buffer);
 
@@ -929,6 +1005,8 @@ impl Drop for VulkanRenderer {
         unsafe {
             // wait until no actions being run on the device before destroying
             logical_device.device_wait_idle().unwrap();
+
+            self.first_mesh.destroy_vertex_buffer(logical_device);
 
             for semaphore in self.render_finished_semaphores.drain(..) {
                 logical_device.destroy_semaphore(semaphore, None);

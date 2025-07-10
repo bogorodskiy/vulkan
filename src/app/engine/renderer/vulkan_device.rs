@@ -12,12 +12,12 @@ impl VulkanDevice {
     pub fn get_logical_device(&self) -> &ash::Device {
         self.logical_device
             .as_ref()
-            .expect("create_and_set_logical_device should be called before calling this method")
+            .expect("logical_device wasn't set")
     }
 
     pub fn get_swapchain_device(&self) -> &ash::khr::swapchain::Device {
         self.swapchain_device
             .as_ref()
-            .expect("create_and_set_swapchain_device should be called before calling this method")
+            .expect("swapchain_device wasn't set")
     }
 }
