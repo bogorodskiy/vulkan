@@ -1,4 +1,5 @@
 pub struct QueueFamilyIndices {
+    // If we have a graphics family, we have a transfer family by default
     pub graphics_family: i32,
     pub presentation_family: i32,
 }

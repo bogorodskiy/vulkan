@@ -3,8 +3,8 @@ mod queue_family;
 mod swapchain;
 mod vertex;
 mod vulkan_device;
+mod vulkan_utilities;
 
-use anyhow::Result;
 use ash::vk;
 use ash::vk::MAX_EXTENSION_NAME_SIZE;
 use nalgebra as na;
@@ -66,7 +66,7 @@ pub struct VulkanRenderer {
 }
 
 impl VulkanRenderer {
-    pub fn new(window: Arc<Window>) -> Result<Self> {
+    pub fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         unsafe {
             let entry = ash::Entry::load()?;
 
@@ -134,13 +134,13 @@ impl VulkanRenderer {
             result.queue_family_indices =
                 result.get_queue_family_indices(result.main_device.physical_device)?;
             result.create_and_set_logical_device()?;
-            result.create_scene_objects()?;
             result.create_and_set_swapchain_device()?;
             result.create_and_set_swapchain()?;
             result.create_render_pass()?;
             result.create_graphics_pipeline()?;
             result.create_framebuffers()?;
             result.create_command_pool()?;
+            result.create_scene_objects()?;
             result.create_command_buffers()?;
             result.record_commands()?;
             result.create_synchronization_objects()?;
@@ -211,7 +211,7 @@ impl VulkanRenderer {
         self.current_frame = (self.current_frame + 1) % MAX_FRAME_DRAWS;
     }
 
-    pub fn resize(&mut self) -> Result<()> {
+    pub fn resize(&mut self) -> anyhow::Result<()> {
         // TODO: resize swapchain
         Ok(())
     }
@@ -219,7 +219,7 @@ impl VulkanRenderer {
     fn check_extension_support(
         properties: Vec<vk::ExtensionProperties>,
         check_extensions: &[*const c_char],
-    ) -> Result<bool> {
+    ) -> anyhow::Result<bool> {
         unsafe {
             for &check_extension in check_extensions.iter() {
                 let check_extension_c_str = CStr::from_ptr(check_extension);
@@ -255,7 +255,7 @@ impl VulkanRenderer {
         Ok(true)
     }
 
-    fn create_and_set_surface(&mut self) -> Result<()> {
+    fn create_and_set_surface(&mut self) -> anyhow::Result<()> {
         let raw_display_handle = self.window.display_handle()?.as_raw();
         let raw_window_handle = self.window.window_handle()?.as_raw();
 
@@ -271,7 +271,7 @@ impl VulkanRenderer {
         }
     }
 
-    fn find_and_set_physical_device(&mut self) -> Result<()> {
+    fn find_and_set_physical_device(&mut self) -> anyhow::Result<()> {
         unsafe {
             for &physical_device in self.instance.enumerate_physical_devices()?.iter() {
                 if self.check_physical_device_suitable(physical_device)? {
@@ -286,7 +286,7 @@ impl VulkanRenderer {
     fn check_physical_device_suitable(
         &mut self,
         physical_device: vk::PhysicalDevice,
-    ) -> Result<bool> {
+    ) -> anyhow::Result<bool> {
         unsafe {
             let extension_properties = self
                 .instance
@@ -314,7 +314,7 @@ impl VulkanRenderer {
     fn get_queue_family_indices(
         &mut self,
         physical_device: vk::PhysicalDevice,
-    ) -> Result<QueueFamilyIndices> {
+    ) -> anyhow::Result<QueueFamilyIndices> {
         let mut result = QueueFamilyIndices {
             graphics_family: -1,
             presentation_family: -1,
@@ -354,7 +354,7 @@ impl VulkanRenderer {
     fn get_swapchain_details(
         &self,
         physical_device: vk::PhysicalDevice,
-    ) -> Result<SwapchainDetails> {
+    ) -> anyhow::Result<SwapchainDetails> {
         unsafe {
             let surface_capabilities = self
                 .surface_extension
@@ -376,7 +376,7 @@ impl VulkanRenderer {
         }
     }
 
-    fn create_and_set_logical_device(&mut self) -> Result<()> {
+    fn create_and_set_logical_device(&mut self) -> anyhow::Result<()> {
         unsafe {
             const HIGHEST_QUEUE_PRIORITY: f32 = 1.0;
 
@@ -414,7 +414,7 @@ impl VulkanRenderer {
         }
     }
 
-    fn create_scene_objects(&mut self) -> Result<()> {
+    fn create_scene_objects(&mut self) -> anyhow::Result<()> {
         let point_1 = na::Vector3::new(0.0, -0.4, 0.0);
         let point_2 = na::Vector3::new(0.4, 0.4, 0.0);
         let point_3 = na::Vector3::new(-0.4, 0.4, 0.0);
@@ -433,20 +433,22 @@ impl VulkanRenderer {
             self.main_device.get_logical_device(),
             self.main_device.physical_device,
             &self.instance,
+            self.graphics_queue,
+            self.graphics_command_pool,
             vertices.as_slice(),
         )?;
 
         Ok(())
     }
 
-    fn create_and_set_swapchain_device(&mut self) -> Result<()> {
+    fn create_and_set_swapchain_device(&mut self) -> anyhow::Result<()> {
         let swapchain_device =
             ash::khr::swapchain::Device::new(&self.instance, self.main_device.get_logical_device());
         self.main_device.swapchain_device = Some(swapchain_device);
         Ok(())
     }
 
-    fn create_and_set_swapchain(&mut self) -> Result<()> {
+    fn create_and_set_swapchain(&mut self) -> anyhow::Result<()> {
         let swapchain_details = self.get_swapchain_details(self.main_device.physical_device)?;
 
         // find optimal surface values
@@ -525,7 +527,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn create_render_pass(&mut self) -> Result<()> {
+    fn create_render_pass(&mut self) -> anyhow::Result<()> {
         // Framebuffer data will be stored as an image, but images can be given different data layouts
         // to give optimal use for certain operations
 
@@ -578,7 +580,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn create_graphics_pipeline(&mut self) -> Result<()> {
+    fn create_graphics_pipeline(&mut self) -> anyhow::Result<()> {
         let vertex_shader_code = match std::fs::read(SHADERS_DIR.to_owned() + "vert.spv") {
             Ok(bytes) => bytes,
             Err(_) => {
@@ -723,7 +725,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn create_framebuffers(&mut self) -> Result<()> {
+    fn create_framebuffers(&mut self) -> anyhow::Result<()> {
         for swapchain_image in self.swapchain_images.iter() {
             unsafe {
                 let frame_buffer = self.main_device.get_logical_device().create_framebuffer(
@@ -742,7 +744,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn create_command_pool(&mut self) -> Result<()> {
+    fn create_command_pool(&mut self) -> anyhow::Result<()> {
         // Create a Graphics Queue Family Command Pool
 
         unsafe {
@@ -757,7 +759,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn create_command_buffers(&mut self) -> Result<()> {
+    fn create_command_buffers(&mut self) -> anyhow::Result<()> {
         unsafe {
             self.command_buffers = self
                 .main_device
@@ -774,7 +776,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn create_synchronization_objects(&mut self) -> Result<()> {
+    fn create_synchronization_objects(&mut self) -> anyhow::Result<()> {
         self.image_available_semaphores = self.create_semaphore_vec(MAX_FRAME_DRAWS);
         self.render_finished_semaphores = self.create_semaphore_vec(MAX_FRAME_DRAWS);
 
@@ -815,7 +817,7 @@ impl VulkanRenderer {
         image: vk::Image,
         format: vk::Format,
         aspect_flags: vk::ImageAspectFlags,
-    ) -> Result<vk::ImageView> {
+    ) -> anyhow::Result<vk::ImageView> {
         unsafe {
             // ComponentSwizzle
             let component_mapping: vk::ComponentMapping = vk::ComponentMapping::default()
@@ -846,7 +848,9 @@ impl VulkanRenderer {
         }
     }
 
-    fn choose_surface_format(formats: &[vk::SurfaceFormatKHR]) -> Result<vk::SurfaceFormatKHR> {
+    fn choose_surface_format(
+        formats: &[vk::SurfaceFormatKHR],
+    ) -> anyhow::Result<vk::SurfaceFormatKHR> {
         let desired_format = vk::Format::R8G8B8A8_UNORM;
         let backup_format = vk::Format::R8G8B8A8_UNORM;
         let desired_color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
@@ -880,7 +884,9 @@ impl VulkanRenderer {
         Err(anyhow::anyhow!("Unable choose a surface format"))
     }
 
-    fn choose_presentation_mode(modes: &[vk::PresentModeKHR]) -> Result<vk::PresentModeKHR> {
+    fn choose_presentation_mode(
+        modes: &[vk::PresentModeKHR],
+    ) -> anyhow::Result<vk::PresentModeKHR> {
         let desired_mode = vk::PresentModeKHR::MAILBOX;
         let backup_mode = vk::PresentModeKHR::FIFO; // Should be always available
         let option_mode = modes.iter().copied().find(|mode| *mode == desired_mode);
@@ -895,7 +901,7 @@ impl VulkanRenderer {
         surface_capabilities: &vk::SurfaceCapabilitiesKHR,
         window_width: u32,
         window_height: u32,
-    ) -> Result<vk::Extent2D> {
+    ) -> anyhow::Result<vk::Extent2D> {
         if surface_capabilities.current_extent.width != u32::MAX {
             return Ok(surface_capabilities.current_extent);
         }
@@ -917,7 +923,7 @@ impl VulkanRenderer {
         Ok(result)
     }
 
-    fn create_shader_module(&self, code: &[u8]) -> Result<vk::ShaderModule> {
+    fn create_shader_module(&self, code: &[u8]) -> anyhow::Result<vk::ShaderModule> {
         let mut code = io::Cursor::new(code);
         let code = ash::util::read_spv(&mut code)?;
         let create_info = vk::ShaderModuleCreateInfo::default().code(&code);
@@ -929,7 +935,7 @@ impl VulkanRenderer {
         Ok(shader_module)
     }
 
-    fn record_commands(&mut self) -> Result<()> {
+    fn record_commands(&mut self) -> anyhow::Result<()> {
         // information about how to begin a render pass
         let mut clear_values = [vk::ClearValue::default()];
         clear_values[0].color = vk::ClearColorValue {

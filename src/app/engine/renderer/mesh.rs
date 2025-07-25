@@ -1,5 +1,6 @@
+// TODO: better module organization to avoid super
+use super::vulkan_utilities::{CreateBufferParameters, VulkanUtilities};
 use crate::app::engine::renderer::vertex;
-use crate::app::engine::renderer::vertex::Vertex;
 use ash::vk;
 
 pub struct Mesh {
@@ -21,6 +22,8 @@ impl Mesh {
         device: &ash::Device,
         physical_device: vk::PhysicalDevice,
         vk_instance: &ash::Instance,
+        transfer_queue: vk::Queue,
+        transfer_command_pool: vk::CommandPool,
         vertices: &[vertex::Vertex],
     ) -> anyhow::Result<Self> {
         let mut result = Self {
@@ -29,7 +32,14 @@ impl Mesh {
             vertex_buffer_memory: vk::DeviceMemory::default(),
         };
 
-        result.create_vertex_buffer(device, physical_device, vk_instance, vertices)?;
+        result.create_vertex_buffer(
+            device,
+            physical_device,
+            vk_instance,
+            transfer_queue,
+            transfer_command_pool,
+            vertices,
+        )?;
         Ok(result)
     }
 
@@ -46,52 +56,32 @@ impl Mesh {
         device: &ash::Device,
         physical_device: vk::PhysicalDevice,
         vk_instance: &ash::Instance,
-        vertices: &[Vertex],
+        transfer_queue: vk::Queue,
+        transfer_command_pool: vk::CommandPool,
+        vertices: &[vertex::Vertex],
     ) -> anyhow::Result<bool> {
         unsafe {
-            let vertex_buffer_size = size_of_val(vertices) as vk::DeviceSize;
-            self.vertex_buffer = device.create_buffer(
-                &vk::BufferCreateInfo::default()
-                    .size(vertex_buffer_size)
-                    .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                None,
-            )?;
+            let buffer_size = size_of_val(vertices) as vk::DeviceSize;
 
-            let memory_requirements = device.get_buffer_memory_requirements(self.vertex_buffer);
+            // Temporary buffer to "stage" vertex data before transferring to GPU
 
-            let memory_properties =
-                vk_instance.get_physical_device_memory_properties(physical_device);
+            let staging_buffer_parameters = CreateBufferParameters {
+                device,
+                physical_device,
+                vk_instance,
+                buffer_size: buffer_size,
+                buffer_usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                buffer_properties: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            };
 
-            // Visible to CPU and the memory after being mapped is placed straight into the buffer
-            let desired_properties =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-            const INDEX_NONE: i32 = -1;
-            let mut memory_type_index = INDEX_NONE;
-            for i in 0..memory_properties.memory_type_count {
-                let is_allowed = memory_requirements.memory_type_bits & (1 << i) != 0;
-                let is_desired = memory_properties.memory_types[i as usize]
-                    .property_flags
-                    .contains(desired_properties);
-                if is_allowed && is_desired {
-                    memory_type_index = i as i32;
-                    break;
-                }
-            }
-            if memory_type_index == INDEX_NONE {
-                return Err(anyhow::anyhow!("Failed to find suitable memory type"));
-            }
+            // Create the staging buffer and allocate memory to it
+            let staging_buffer_result = VulkanUtilities::create_buffer(staging_buffer_parameters)?;
 
-            let memory_alloc_info = vk::MemoryAllocateInfo::default()
-                .allocation_size(memory_requirements.size)
-                .memory_type_index(memory_type_index as u32);
-
-            self.vertex_buffer_memory = device.allocate_memory(&memory_alloc_info, None)?;
-            device.bind_buffer_memory(self.vertex_buffer, self.vertex_buffer_memory, 0)?;
             let data = device.map_memory(
-                self.vertex_buffer_memory,
+                staging_buffer_result.buffer_memory,
                 0,
-                vertex_buffer_size,
+                buffer_size,
                 vk::MemoryMapFlags::empty(),
             )?;
 
@@ -99,10 +89,40 @@ impl Mesh {
             std::ptr::copy_nonoverlapping(
                 vertices.as_ptr() as *const u8,
                 data as *mut u8,
-                vertex_buffer_size as usize,
+                buffer_size as usize,
             );
 
-            device.unmap_memory(self.vertex_buffer_memory);
+            device.unmap_memory(staging_buffer_result.buffer_memory);
+
+            // Create a buffer with TRANSFER_DST to mark as the recipient of the transfer data (also VERTEX_BUFFER)
+            // Buffer memory is to be DEVICE_LOCAL meaning the memory is on the GPU and only accessible but it and not the CPU (host)
+            let vertex_buffer_parameters = CreateBufferParameters {
+                device,
+                physical_device,
+                vk_instance,
+                buffer_size: buffer_size,
+                buffer_usage: vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::VERTEX_BUFFER,
+                buffer_properties: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            };
+
+            let vertex_buffer_result = VulkanUtilities::create_buffer(vertex_buffer_parameters)?;
+
+            self.vertex_buffer = vertex_buffer_result.buffer;
+            self.vertex_buffer_memory = vertex_buffer_result.buffer_memory;
+
+            // Copy staging buffer to vertex buffer on GPU
+            VulkanUtilities::copy_buffer(
+                device,
+                transfer_queue,
+                transfer_command_pool,
+                staging_buffer_result.buffer,
+                self.vertex_buffer,
+                buffer_size,
+            )?;
+
+            device.destroy_buffer(staging_buffer_result.buffer, None);
+            device.free_memory(staging_buffer_result.buffer_memory, None);
         }
 
         Ok(true)
