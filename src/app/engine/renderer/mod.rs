@@ -62,7 +62,7 @@ pub struct VulkanRenderer {
     graphics_command_pool: vk::CommandPool,
 
     // Scene objects
-    first_mesh: mesh::Mesh,
+    mesh_list: Vec<mesh::Mesh>,
 }
 
 impl VulkanRenderer {
@@ -107,7 +107,7 @@ impl VulkanRenderer {
                     swapchain_device: None,
                 },
                 current_frame: 0,
-                first_mesh: mesh::Mesh::default(),
+                mesh_list: Default::default(),
                 graphics_queue: Default::default(),
                 presentation_queue: Default::default(),
                 surface_extension: surface_extension,
@@ -415,28 +415,59 @@ impl VulkanRenderer {
     }
 
     fn create_scene_objects(&mut self) -> anyhow::Result<()> {
-        let point_1 = na::Vector3::new(0.0, -0.4, 0.0);
-        let point_2 = na::Vector3::new(0.4, 0.4, 0.0);
-        let point_3 = na::Vector3::new(-0.4, 0.4, 0.0);
+        let left_rect_point_1 = na::Vector3::new(-0.1, -0.4, 0.0);
+        let left_rect_point_2 = na::Vector3::new(-0.1, 0.4, 0.0);
+        let left_rect_point_3 = na::Vector3::new(-0.9, 0.4, 0.0);
+        let left_rect_point_4 = na::Vector3::new(-0.9, -0.4, 0.0);
+
+        let right_rect_point_1 = na::Vector3::new(0.9, -0.4, 0.0);
+        let right_rect_point_2 = na::Vector3::new(0.9, 0.4, 0.0);
+        let right_rect_point_3 = na::Vector3::new(0.1, 0.4, 0.0);
+        let right_rect_point_4 = na::Vector3::new(0.1, -0.4, 0.0);
 
         let color_1 = na::Vector3::new(1.0, 0.0, 0.0);
         let color_2 = na::Vector3::new(0.0, 1.0, 0.0);
         let color_3 = na::Vector3::new(0.0, 0.0, 1.0);
+        let color_4 = na::Vector3::new(1.0, 1.0, 0.0);
 
-        let vertices: Vec<vertex::Vertex> = vec![
-            vertex::Vertex::new(point_1, color_1),
-            vertex::Vertex::new(point_2, color_2),
-            vertex::Vertex::new(point_3, color_3),
+        let left_rect_vertices: Vec<vertex::Vertex> = vec![
+            vertex::Vertex::new(left_rect_point_1, color_1),
+            vertex::Vertex::new(left_rect_point_2, color_2),
+            vertex::Vertex::new(left_rect_point_3, color_3),
+            vertex::Vertex::new(left_rect_point_4, color_4),
         ];
 
-        self.first_mesh = mesh::Mesh::new(
+        let right_rect_vertices: Vec<vertex::Vertex> = vec![
+            vertex::Vertex::new(right_rect_point_1, color_1),
+            vertex::Vertex::new(right_rect_point_2, color_2),
+            vertex::Vertex::new(right_rect_point_3, color_3),
+            vertex::Vertex::new(right_rect_point_4, color_4),
+        ];
+
+        let indices: Vec<u32> = vec![0, 1, 2, 2, 3, 0];
+
+        let left_mesh = mesh::Mesh::new(
             self.main_device.get_logical_device(),
             self.main_device.physical_device,
             &self.instance,
             self.graphics_queue,
             self.graphics_command_pool,
-            vertices.as_slice(),
+            left_rect_vertices.as_slice(),
+            indices.as_slice(),
         )?;
+
+        let right_mesh = mesh::Mesh::new(
+            self.main_device.get_logical_device(),
+            self.main_device.physical_device,
+            &self.instance,
+            self.graphics_queue,
+            self.graphics_command_pool,
+            right_rect_vertices.as_slice(),
+            indices.as_slice(),
+        )?;
+
+        self.mesh_list.push(left_mesh);
+        self.mesh_list.push(right_mesh);
 
         Ok(())
     }
@@ -974,23 +1005,35 @@ impl VulkanRenderer {
                     self.graphics_pipeline,
                 );
 
-                let vertex_buffers = [self.first_mesh.get_vertex_buffer()]; // buffer to bind
-                let vertex_buffers_offsets = [0 as vk::DeviceSize]; // offsets into buffers being bound
-                logical_device.cmd_bind_vertex_buffers(
-                    command_buffer,
-                    0,
-                    &vertex_buffers,
-                    &vertex_buffers_offsets,
-                );
+                for mesh in self.mesh_list.iter() {
+                    logical_device.cmd_bind_vertex_buffers(
+                        command_buffer,
+                        0,
+                        // buffer to bind
+                        &[mesh.get_vertex_buffer()],
+                        // offsets into buffers being bound
+                        &[0 as vk::DeviceSize],
+                    );
 
-                // Execute pipeline
-                logical_device.cmd_draw(
-                    command_buffer,
-                    self.first_mesh.get_vertex_count(),
-                    1,
-                    0,
-                    0,
-                );
+                    // only one index buffer, but it can be used for many vertex buffers
+                    logical_device.cmd_bind_index_buffer(
+                        command_buffer,
+                        mesh.get_index_buffer(),
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+
+                    // Execute pipeline
+
+                    logical_device.cmd_draw_indexed(
+                        command_buffer,
+                        mesh.get_index_count(),
+                        1,
+                        0,
+                        0,
+                        0,
+                    );
+                }
 
                 logical_device.cmd_end_render_pass(command_buffer);
 
@@ -1012,7 +1055,9 @@ impl Drop for VulkanRenderer {
             // wait until no actions being run on the device before destroying
             logical_device.device_wait_idle().unwrap();
 
-            self.first_mesh.destroy_vertex_buffer(logical_device);
+            for mesh in self.mesh_list.iter_mut() {
+                mesh.destroy_buffers(logical_device);
+            }
 
             for semaphore in self.render_finished_semaphores.drain(..) {
                 logical_device.destroy_semaphore(semaphore, None);
