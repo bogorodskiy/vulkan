@@ -16,6 +16,9 @@ use std::sync::Arc;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
+use crate::app::engine::renderer::vulkan_utilities::{
+    CreateBufferParameters, ModelViewProjection, VulkanUtilities,
+};
 use queue_family::QueueFamilyIndices;
 use swapchain::{SwapchainDetails, SwapchainImage};
 use vulkan_device::VulkanDevice;
@@ -48,6 +51,15 @@ pub struct VulkanRenderer {
     swapchain_image_format: vk::Format,
     swapchain_extent: vk::Extent2D,
 
+    // Descriptors
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
+
+    // one buffer per every command buffer
+    uniform_buffers: Vec<vk::Buffer>,
+    uniform_buffers_memory: Vec<vk::DeviceMemory>,
+
     // Synchronization
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
@@ -63,6 +75,9 @@ pub struct VulkanRenderer {
 
     // Scene objects
     mesh_list: Vec<mesh::Mesh>,
+
+    // Scene settings
+    model_view_projection: ModelViewProjection,
 }
 
 impl VulkanRenderer {
@@ -122,10 +137,16 @@ impl VulkanRenderer {
                 draw_fences: Default::default(),
                 swapchain_image_format: vk::Format::UNDEFINED,
                 swapchain_extent: Default::default(),
+                descriptor_set_layout: Default::default(),
+                descriptor_pool: Default::default(),
+                descriptor_sets: Default::default(),
+                uniform_buffers: Default::default(),
+                uniform_buffers_memory: Default::default(),
                 graphics_pipeline: Default::default(),
                 pipeline_layout: Default::default(),
                 render_pass: Default::default(),
                 graphics_command_pool: Default::default(),
+                model_view_projection: Default::default(),
             };
 
             result.create_and_set_surface()?;
@@ -137,16 +158,25 @@ impl VulkanRenderer {
             result.create_and_set_swapchain_device()?;
             result.create_and_set_swapchain()?;
             result.create_render_pass()?;
+            result.create_descriptor_set_layout()?;
             result.create_graphics_pipeline()?;
             result.create_framebuffers()?;
             result.create_command_pool()?;
+            result.create_mvp()?;
             result.create_scene_objects()?;
             result.create_command_buffers()?;
+            result.create_uniform_buffers()?;
+            result.create_descriptor_pool()?;
+            result.create_descriptor_sets()?;
             result.record_commands()?;
             result.create_synchronization_objects()?;
 
             Ok(result)
         }
+    }
+
+    pub fn update_model(&mut self, new_model: na::Matrix4<f32>) {
+        self.model_view_projection.model = new_model;
     }
 
     pub fn draw(&mut self) {
@@ -168,6 +198,8 @@ impl VulkanRenderer {
                 .reset_fences(&[self.draw_fences[self.current_frame]])
                 .unwrap();
 
+            // TODO: fences before or after swapchain acquire?
+
             let (image_index, _is_suboptimal) = self
                 .main_device
                 .get_swapchain_device()
@@ -180,8 +212,11 @@ impl VulkanRenderer {
                 .unwrap();
             // TODO: handle is_suboptimal
 
+            self.update_uniform_buffer(image_index).unwrap();
+
             // Submit the command buffer to the queue
-            logical_device
+            self.main_device
+                .get_logical_device()
                 .queue_submit(
                     self.graphics_queue,
                     &[vk::SubmitInfo::default()
@@ -414,6 +449,27 @@ impl VulkanRenderer {
         }
     }
 
+    fn create_mvp(&mut self) -> anyhow::Result<()> {
+        self.model_view_projection.projection = na::Matrix4::new_perspective(
+            self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32,
+            45.0_f32.to_radians(),
+            0.1,
+            100.0,
+        );
+        self.model_view_projection.view = na::Matrix4::look_at_rh(
+            &na::Point3::new(0.0f32, 0.0, 2.0), // look from
+            &na::Point3::new(0.0, 0.0, 0.0),    // look at
+            &na::Vector3::new(0.0, 1.0, 0.0),
+        );
+        self.model_view_projection.model = na::Matrix4::<f32>::identity();
+
+        // Invert the y-axis in the projection because Vulkan uses a different coordinate system
+        // nalgebra works in a similar way to GLM which was made for OpenGL
+        self.model_view_projection.projection[(1, 1)] *= -1.0;
+
+        Ok(())
+    }
+
     fn create_scene_objects(&mut self) -> anyhow::Result<()> {
         let left_rect_point_1 = na::Vector3::new(-0.1, -0.4, 0.0);
         let left_rect_point_2 = na::Vector3::new(-0.1, 0.4, 0.0);
@@ -611,6 +667,26 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    fn create_descriptor_set_layout(&mut self) -> anyhow::Result<()> {
+        unsafe {
+            self.descriptor_set_layout = self
+                .main_device
+                .get_logical_device()
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[
+                        vk::DescriptorSetLayoutBinding::default()
+                            .binding(0)
+                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                            .descriptor_count(1)
+                            .stage_flags(vk::ShaderStageFlags::VERTEX),
+                    ]),
+                    None,
+                )?;
+        }
+
+        Ok(())
+    }
+
     fn create_graphics_pipeline(&mut self) -> anyhow::Result<()> {
         let vertex_shader_code = match std::fs::read(SHADERS_DIR.to_owned() + "vert.spv") {
             Ok(bytes) => bytes,
@@ -667,8 +743,10 @@ impl VulkanRenderer {
 
         let logical_device = self.main_device.get_logical_device();
         unsafe {
-            self.pipeline_layout = logical_device
-                .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None)?;
+            self.pipeline_layout = logical_device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&[self.descriptor_set_layout]),
+                None,
+            )?;
 
             self.graphics_pipeline = logical_device
                 .create_graphics_pipelines(
@@ -704,7 +782,7 @@ impl VulkanRenderer {
                                 .rasterizer_discard_enable(false)
                                 .polygon_mode(vk::PolygonMode::FILL)
                                 .cull_mode(vk::CullModeFlags::BACK)
-                                .front_face(vk::FrontFace::CLOCKWISE)
+                                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
                                 .line_width(1.0)
                                 .depth_bias_enable(false),
                         )
@@ -824,6 +902,126 @@ impl VulkanRenderer {
             .take(MAX_FRAME_DRAWS)
             .collect()
         };
+
+        Ok(())
+    }
+
+    fn create_uniform_buffers(&mut self) -> anyhow::Result<()> {
+        let buffer_size = size_of_val(&self.model_view_projection) as vk::DeviceSize;
+
+        self.uniform_buffers.reserve(self.swapchain_images.len());
+        self.uniform_buffers_memory
+            .reserve(self.swapchain_images.len());
+
+        // Temporary buffer to "stage" vertex data before transferring to GPU
+        let buffer_parameters = CreateBufferParameters {
+            device: self.main_device.get_logical_device(),
+            physical_device: self.main_device.physical_device,
+            vk_instance: &self.instance,
+            buffer_size: buffer_size,
+            buffer_usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            buffer_properties: vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT,
+        };
+
+        unsafe {
+            for i in 0..self.swapchain_images.len() {
+                let buffer_result = VulkanUtilities::create_buffer(buffer_parameters)?;
+                self.uniform_buffers.push(buffer_result.buffer);
+                self.uniform_buffers_memory
+                    .push(buffer_result.buffer_memory);
+            }
+        }
+
+        Ok(())
+    }
+
+    // should be created after uniform_buffers
+    fn create_descriptor_pool(&mut self) -> anyhow::Result<()> {
+        let pool_sizes = [
+            // how many descriptors, not descriptor sets
+            vk::DescriptorPoolSize::default().descriptor_count(self.uniform_buffers.len() as u32),
+        ];
+
+        let pool_create_info = vk::DescriptorPoolCreateInfo::default()
+            // maximum number of descriptor sets that can be created from this pool
+            .max_sets(self.uniform_buffers.len() as u32)
+            .pool_sizes(&pool_sizes);
+
+        unsafe {
+            self.descriptor_pool = self
+                .main_device
+                .get_logical_device()
+                .create_descriptor_pool(&pool_create_info, None)?;
+        }
+
+        Ok(())
+    }
+
+    // should be created after descriptor_pool
+    fn create_descriptor_sets(&mut self) -> anyhow::Result<()> {
+        let descriptor_set_count = self.uniform_buffers.len();
+        let set_layouts = vec![self.descriptor_set_layout; descriptor_set_count];
+        let allocate_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(self.descriptor_pool)
+            .set_layouts(&set_layouts);
+
+        unsafe {
+            self.descriptor_sets = self
+                .main_device
+                .get_logical_device()
+                .allocate_descriptor_sets(&allocate_info)?;
+        }
+
+        // update all descriptor sets buffer bindings
+        for i in 0..descriptor_set_count {
+            // buffer info and data offset info
+            let mvp_buffer_info = vk::DescriptorBufferInfo::default()
+                .buffer(self.uniform_buffers[i])
+                .offset(0)
+                .range(size_of_val(&self.model_view_projection) as vk::DeviceSize);
+
+            // Create a slice containing the buffer info to extend its lifetime
+            let buffer_infos = [mvp_buffer_info];
+
+            // Data about the connection between the binding and the buffer
+            let mvp_set_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .buffer_info(&buffer_infos);
+
+            unsafe {
+                // Update the descriptor sets with the new buffer/binding info
+                self.main_device
+                    .get_logical_device()
+                    .update_descriptor_sets(&[mvp_set_write], &[]);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn update_uniform_buffer(&mut self, image_index: u32) -> anyhow::Result<()> {
+        unsafe {
+            let size_of_mvp = size_of_val(&self.model_view_projection);
+            let data = self.main_device.get_logical_device().map_memory(
+                self.uniform_buffers_memory[image_index as usize],
+                0,
+                size_of_mvp as vk::DeviceSize,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            std::ptr::copy_nonoverlapping(
+                &self.model_view_projection as *const _ as *const u8,
+                data as *mut u8,
+                size_of_mvp,
+            );
+            self.main_device
+                .get_logical_device()
+                .unmap_memory(self.uniform_buffers_memory[image_index as usize]);
+        }
 
         Ok(())
     }
@@ -1023,8 +1221,16 @@ impl VulkanRenderer {
                         vk::IndexType::UINT32,
                     );
 
-                    // Execute pipeline
+                    logical_device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipeline_layout,
+                        0,
+                        &[self.descriptor_sets[command_buffer_index]],
+                        &[],
+                    );
 
+                    // Execute pipeline
                     logical_device.cmd_draw_indexed(
                         command_buffer,
                         mesh.get_index_count(),
@@ -1054,6 +1260,16 @@ impl Drop for VulkanRenderer {
         unsafe {
             // wait until no actions being run on the device before destroying
             logical_device.device_wait_idle().unwrap();
+
+            logical_device.destroy_descriptor_pool(self.descriptor_pool, None);
+            logical_device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+
+            for uniform_buffer in self.uniform_buffers.iter() {
+                logical_device.destroy_buffer(*uniform_buffer, None);
+            }
+            for uniform_buffer_memory in self.uniform_buffers_memory.iter() {
+                logical_device.free_memory(*uniform_buffer_memory, None);
+            }
 
             for mesh in self.mesh_list.iter_mut() {
                 mesh.destroy_buffers(logical_device);

@@ -1,5 +1,7 @@
 use ash::vk;
+use nalgebra as na;
 
+#[derive(Copy, Clone)]
 pub struct CreateBufferParameters<'a> {
     pub device: &'a ash::Device,
     pub physical_device: vk::PhysicalDevice,
@@ -12,6 +14,22 @@ pub struct CreateBufferParameters<'a> {
 pub struct CreateBufferResult {
     pub buffer: vk::Buffer,
     pub buffer_memory: vk::DeviceMemory,
+}
+
+pub struct ModelViewProjection {
+    pub projection: na::Matrix4<f32>,
+    pub view: na::Matrix4<f32>,
+    pub model: na::Matrix4<f32>,
+}
+
+impl Default for ModelViewProjection {
+    fn default() -> Self {
+        Self {
+            projection: na::Matrix4::identity(),
+            view: na::Matrix4::identity(),
+            model: na::Matrix4::identity(),
+        }
+    }
 }
 
 pub struct VulkanUtilities;

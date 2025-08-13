@@ -2,6 +2,7 @@
 
 use crate::app::engine::renderer::VulkanRenderer;
 use anyhow::Result;
+use nalgebra as na;
 use std::sync::Arc;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
@@ -26,6 +27,8 @@ impl BaseEngine for UninitializedEngine {
 
 pub struct Engine {
     renderer: VulkanRenderer,
+    angle: f32,
+    last_time: std::time::Instant,
 }
 
 impl Engine {
@@ -37,7 +40,11 @@ impl Engine {
         let window = Arc::new(event_loop.create_window(window_attributes)?);
         let renderer = VulkanRenderer::new(window)?;
 
-        Ok(Self { renderer })
+        Ok(Self {
+            renderer: renderer,
+            angle: 0.0,
+            last_time: std::time::Instant::now(),
+        })
     }
 }
 
@@ -62,6 +69,17 @@ impl BaseEngine for Engine {
     }
 
     fn request_redraw(&mut self) {
+        let delta_time = self.last_time.elapsed().as_secs_f32();
+        self.last_time = std::time::Instant::now();
+        self.angle += delta_time * 10.0;
+        if self.angle > 360.0 {
+            self.angle -= 360.0;
+        }
+
+        let rotation_matrix =
+            na::Matrix4::from_axis_angle(&na::Vector3::z_axis(), self.angle.to_radians());
+
+        self.renderer.update_model(rotation_matrix);
         self.renderer.draw();
     }
 }

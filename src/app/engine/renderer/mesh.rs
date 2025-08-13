@@ -79,9 +79,9 @@ impl Mesh {
 
         // Temporary buffer to "stage" vertex data before transferring to GPU
         let staging_buffer_parameters = CreateBufferParameters {
-            device,
-            physical_device,
-            vk_instance,
+            device: device,
+            physical_device: physical_device,
+            vk_instance: vk_instance,
             buffer_size: buffer_size,
             buffer_usage: vk::BufferUsageFlags::TRANSFER_SRC,
             buffer_properties: vk::MemoryPropertyFlags::HOST_VISIBLE
