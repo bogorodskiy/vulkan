@@ -1,9 +1,10 @@
 // TODO: better module organization to avoid super
-use super::vulkan_utilities::{CreateBufferParameters, VulkanUtilities};
+use super::vulkan_utilities::{CreateBufferParameters, UBOModel, VulkanUtilities};
 use crate::app::engine::renderer::vertex;
 use ash::vk;
 
 pub struct Mesh {
+    ubo_model: UBOModel,
     vertex_count: u32,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
@@ -15,6 +16,7 @@ pub struct Mesh {
 impl Mesh {
     pub fn default() -> Self {
         Self {
+            ubo_model: UBOModel::default(),
             vertex_count: 0,
             vertex_buffer: vk::Buffer::default(),
             vertex_buffer_memory: vk::DeviceMemory::default(),
@@ -56,6 +58,14 @@ impl Mesh {
         )?;
 
         Ok(result)
+    }
+
+    pub fn get_ubo_model(&self) -> &UBOModel {
+        &self.ubo_model
+    }
+
+    pub fn set_ubo_model(&mut self, ubo_model: UBOModel) {
+        self.ubo_model = ubo_model;
     }
 
     pub fn get_vertex_buffer(&self) -> vk::Buffer {
@@ -158,7 +168,6 @@ impl Mesh {
         transfer_command_pool: vk::CommandPool,
         indices: &[u32],
     ) -> anyhow::Result<bool> {
-        // TODO: check if the size is correct
         let buffer_size = size_of_val(indices) as vk::DeviceSize;
 
         let staging_buffer_parameters = CreateBufferParameters {

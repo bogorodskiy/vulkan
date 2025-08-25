@@ -76,10 +76,21 @@ impl BaseEngine for Engine {
             self.angle -= 360.0;
         }
 
-        let rotation_matrix =
-            na::Matrix4::from_axis_angle(&na::Vector3::z_axis(), self.angle.to_radians());
+        let first_model = na::Matrix4::new_translation(&na::Vector3::new(-2.0, 0.0, -5.0))
+            * na::Matrix4::from_axis_angle(
+                &na::Unit::new_normalize(na::Vector3::new(0.0, 0.0, 1.0)),
+                self.angle.to_radians(),
+            );
 
-        self.renderer.update_model(rotation_matrix);
+        let second_model = na::Matrix4::new_translation(&na::Vector3::new(2.0, 0.0, -5.0))
+            * na::Matrix4::from_axis_angle(
+                &na::Unit::new_normalize(na::Vector3::new(0.0, 0.0, 1.0)),
+                (-self.angle * 100.0).to_radians(),
+            );
+
+        self.renderer.update_model(0, first_model);
+        self.renderer.update_model(1, second_model);
+
         self.renderer.draw();
     }
 }

@@ -16,18 +16,34 @@ pub struct CreateBufferResult {
     pub buffer_memory: vk::DeviceMemory,
 }
 
-pub struct ModelViewProjection {
+pub struct UBOViewProjection {
     pub projection: na::Matrix4<f32>,
     pub view: na::Matrix4<f32>,
-    pub model: na::Matrix4<f32>,
 }
 
-impl Default for ModelViewProjection {
+// Uniform buffer object model
+#[derive(Copy, Clone)]
+pub struct UBOModel {
+    model: na::Matrix4<f32>,
+}
+
+impl UBOModel {
+    pub fn default() -> Self {
+        Self {
+            model: na::Matrix4::identity(),
+        }
+    }
+
+    pub fn new(model: na::Matrix4<f32>) -> Self {
+        Self { model }
+    }
+}
+
+impl Default for UBOViewProjection {
     fn default() -> Self {
         Self {
             projection: na::Matrix4::identity(),
             view: na::Matrix4::identity(),
-            model: na::Matrix4::identity(),
         }
     }
 }
