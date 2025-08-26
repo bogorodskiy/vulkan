@@ -1,10 +1,10 @@
 // TODO: better module organization to avoid super
-use super::vulkan_utilities::{CreateBufferParameters, UBOModel, VulkanUtilities};
+use super::vulkan_utilities::{CreateBufferParameters, Model, VulkanUtilities};
 use crate::app::engine::renderer::vertex;
 use ash::vk;
 
 pub struct Mesh {
-    ubo_model: UBOModel,
+    model: Model,
     vertex_count: u32,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
@@ -16,7 +16,7 @@ pub struct Mesh {
 impl Mesh {
     pub fn default() -> Self {
         Self {
-            ubo_model: UBOModel::default(),
+            model: Model::default(),
             vertex_count: 0,
             vertex_buffer: vk::Buffer::default(),
             vertex_buffer_memory: vk::DeviceMemory::default(),
@@ -60,12 +60,12 @@ impl Mesh {
         Ok(result)
     }
 
-    pub fn get_ubo_model(&self) -> &UBOModel {
-        &self.ubo_model
+    pub fn get_model(&self) -> &Model {
+        &self.model
     }
 
-    pub fn set_ubo_model(&mut self, ubo_model: UBOModel) {
-        self.ubo_model = ubo_model;
+    pub fn set_model(&mut self, model: Model) {
+        self.model = model;
     }
 
     pub fn get_vertex_buffer(&self) -> vk::Buffer {

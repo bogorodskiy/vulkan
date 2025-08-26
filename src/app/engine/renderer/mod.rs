@@ -4,7 +4,6 @@ mod swapchain;
 mod vertex;
 mod vulkan_device;
 mod vulkan_utilities;
-use std::alloc::{alloc, dealloc, Layout};
 
 use ash::vk;
 use ash::vk::MAX_EXTENSION_NAME_SIZE;
@@ -18,7 +17,7 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
 use crate::app::engine::renderer::vulkan_utilities::{
-    CreateBufferParameters, UBOModel, UBOViewProjection, VulkanUtilities,
+    CreateBufferParameters, Model, UBOViewProjection, VulkanUtilities,
 };
 use queue_family::QueueFamilyIndices;
 use swapchain::{SwapchainDetails, SwapchainImage};
@@ -26,7 +25,6 @@ use vulkan_device::VulkanDevice;
 
 const SHADERS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/shaders/");
 const MAX_FRAME_DRAWS: usize = 2;
-const MAX_OBJECTS: usize = 2;
 
 pub struct VulkanRenderer {
     // Vulkan components
@@ -55,17 +53,13 @@ pub struct VulkanRenderer {
 
     // Descriptors
     descriptor_set_layout: vk::DescriptorSetLayout,
+    push_constant_range: vk::PushConstantRange,
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,
 
     // One buffer per every command buffer
     view_projection_uniform_buffers: Vec<vk::Buffer>,
     view_projection_uniform_buffers_memory: Vec<vk::DeviceMemory>,
-    min_uniform_buffer_offset: vk::DeviceSize,
-    model_uniform_alignment: usize,
-    model_transfer_space: *mut u8, // Pointer to the dynamic buffer that is aligned to model_uniform_alignment and holds MAX_OBJECTS
-    model_dynamic_uniform_buffers: Vec<vk::Buffer>,
-    model_dynamic_uniform_buffers_memory: Vec<vk::DeviceMemory>,
 
     // Synchronization
     image_available_semaphores: Vec<vk::Semaphore>,
@@ -145,15 +139,11 @@ impl VulkanRenderer {
                 swapchain_image_format: vk::Format::UNDEFINED,
                 swapchain_extent: Default::default(),
                 descriptor_set_layout: Default::default(),
+                push_constant_range: Default::default(),
                 descriptor_pool: Default::default(),
                 descriptor_sets: Default::default(),
                 view_projection_uniform_buffers: Default::default(),
                 view_projection_uniform_buffers_memory: Default::default(),
-                min_uniform_buffer_offset: Default::default(),
-                model_uniform_alignment: Default::default(),
-                model_transfer_space: std::ptr::null_mut(),
-                model_dynamic_uniform_buffers: Default::default(),
-                model_dynamic_uniform_buffers_memory: Default::default(),
                 graphics_pipeline: Default::default(),
                 pipeline_layout: Default::default(),
                 render_pass: Default::default(),
@@ -171,17 +161,16 @@ impl VulkanRenderer {
             result.create_and_set_swapchain()?;
             result.create_render_pass()?;
             result.create_descriptor_set_layout()?;
+            result.create_push_constant_range()?;
             result.create_graphics_pipeline()?;
             result.create_framebuffers()?;
             result.create_command_pool()?;
             result.create_view_projection()?;
             result.create_scene_objects()?;
             result.create_command_buffers()?;
-            result.allocate_dynamic_buffer_transfer_space()?;
             result.create_uniform_buffers()?;
             result.create_descriptor_pool()?;
             result.create_descriptor_sets()?;
-            result.record_commands()?;
             result.create_synchronization_objects()?;
 
             Ok(result)
@@ -193,7 +182,7 @@ impl VulkanRenderer {
             return;
         }
 
-        self.mesh_list[model_index].set_ubo_model(UBOModel::new(new_model));
+        self.mesh_list[model_index].set_model(Model::new(new_model));
     }
 
     pub fn draw(&mut self) {
@@ -235,6 +224,7 @@ impl VulkanRenderer {
                 .unwrap();
             // TODO: handle is_suboptimal
 
+            self.record_commands(image_index as usize).unwrap();
             self.update_uniform_buffers(image_index).unwrap();
 
             // Submit the command buffer to the queue
@@ -334,11 +324,6 @@ impl VulkanRenderer {
             for &physical_device in self.instance.enumerate_physical_devices()?.iter() {
                 if self.check_physical_device_suitable(physical_device)? {
                     self.main_device.physical_device = physical_device;
-                    let device_properties = self
-                        .instance
-                        .get_physical_device_properties(physical_device);
-                    self.min_uniform_buffer_offset =
-                        device_properties.limits.min_uniform_buffer_offset_alignment;
 
                     return Ok(());
                 }
@@ -373,28 +358,6 @@ impl VulkanRenderer {
                 && device_properties.api_version >= vk::API_VERSION_1_3;
             Ok(suitable)
         }
-    }
-
-    fn allocate_dynamic_buffer_transfer_space(&mut self) -> anyhow::Result<()> {
-        // Calculate alignment of model data
-        let ubo_model_size = size_of::<UBOModel>();
-        self.model_uniform_alignment = (ubo_model_size + self.min_uniform_buffer_offset as usize
-            - 1)
-            & !(self.min_uniform_buffer_offset as usize - 1);
-
-        let layout = Layout::from_size_align(
-            self.model_uniform_alignment * MAX_OBJECTS,
-            self.model_uniform_alignment,
-        )?;
-        let ptr = unsafe { alloc(layout) };
-        if ptr.is_null() {
-            return Err(anyhow::anyhow!("Allocation error"));
-        }
-
-        // Create space in memory to hold the dynamic buffer that is aligned to our required alignment and holds MAX_OBJECTS
-        self.model_transfer_space = ptr;
-
-        Ok(())
     }
 
     fn get_queue_family_indices(
@@ -741,22 +704,25 @@ impl VulkanRenderer {
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::VERTEX);
-            let model_layout_binding = vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::VERTEX);
 
             self.descriptor_set_layout = self
                 .main_device
                 .get_logical_device()
                 .create_descriptor_set_layout(
                     &vk::DescriptorSetLayoutCreateInfo::default()
-                        .bindings(&[view_projection_layout_binding, model_layout_binding]),
+                        .bindings(&[view_projection_layout_binding]),
                     None,
                 )?;
         }
 
+        Ok(())
+    }
+
+    fn create_push_constant_range(&mut self) -> anyhow::Result<()> {
+        self.push_constant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .offset(0)
+            .size(size_of::<Model>() as u32);
         Ok(())
     }
 
@@ -817,7 +783,9 @@ impl VulkanRenderer {
         let logical_device = self.main_device.get_logical_device();
         unsafe {
             self.pipeline_layout = logical_device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default().set_layouts(&[self.descriptor_set_layout]),
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&[self.descriptor_set_layout])
+                    .push_constant_ranges(&[self.push_constant_range]),
                 None,
             )?;
 
@@ -933,7 +901,8 @@ impl VulkanRenderer {
             self.graphics_command_pool =
                 self.main_device.get_logical_device().create_command_pool(
                     &vk::CommandPoolCreateInfo::default()
-                        .queue_family_index(self.queue_family_indices.graphics_family as u32),
+                        .queue_family_index(self.queue_family_indices.graphics_family as u32)
+                        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
                     None,
                 )?;
         }
@@ -981,17 +950,11 @@ impl VulkanRenderer {
 
     fn create_uniform_buffers(&mut self) -> anyhow::Result<()> {
         let view_projection_buffer_size = size_of_val(&self.ubo_view_projection) as vk::DeviceSize;
-        let model_buffer_size = (self.model_uniform_alignment * MAX_OBJECTS) as vk::DeviceSize;
         let num_uniform_buffers = self.swapchain_images.len();
 
         self.view_projection_uniform_buffers
             .reserve(num_uniform_buffers);
         self.view_projection_uniform_buffers_memory
-            .reserve(num_uniform_buffers);
-
-        self.model_dynamic_uniform_buffers
-            .reserve(num_uniform_buffers);
-        self.model_dynamic_uniform_buffers_memory
             .reserve(num_uniform_buffers);
 
         // Temporary buffer to "stage" vertex data before transferring to GPU
@@ -1005,28 +968,12 @@ impl VulkanRenderer {
                 | vk::MemoryPropertyFlags::HOST_COHERENT,
         };
 
-        let model_buffer_parameters = CreateBufferParameters {
-            device: self.main_device.get_logical_device(),
-            physical_device: self.main_device.physical_device,
-            vk_instance: &self.instance,
-            buffer_size: model_buffer_size,
-            buffer_usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-            buffer_properties: vk::MemoryPropertyFlags::HOST_VISIBLE
-                | vk::MemoryPropertyFlags::HOST_COHERENT,
-        };
-
-        for i in 0..num_uniform_buffers {
+        for _ in 0..num_uniform_buffers {
             let vp_buffer_result = VulkanUtilities::create_buffer(vp_buffer_parameters)?;
             self.view_projection_uniform_buffers
                 .push(vp_buffer_result.buffer);
             self.view_projection_uniform_buffers_memory
                 .push(vp_buffer_result.buffer_memory);
-
-            let model_buffer_result = VulkanUtilities::create_buffer(model_buffer_parameters)?;
-            self.model_dynamic_uniform_buffers
-                .push(model_buffer_result.buffer);
-            self.model_dynamic_uniform_buffers_memory
-                .push(model_buffer_result.buffer_memory);
         }
 
         Ok(())
@@ -1039,10 +986,6 @@ impl VulkanRenderer {
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(self.view_projection_uniform_buffers.len() as u32),
-            // Model pools
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)
-                .descriptor_count(self.model_dynamic_uniform_buffers.len() as u32),
         ];
 
         let pool_create_info = vk::DescriptorPoolCreateInfo::default()
@@ -1097,26 +1040,11 @@ impl VulkanRenderer {
                 .descriptor_count(1)
                 .buffer_info(&vp_buffer_infos);
 
-            //  MODEL DESCRIPTOR ============
-            let model_buffer_info = vk::DescriptorBufferInfo::default()
-                .buffer(self.model_dynamic_uniform_buffers[i])
-                .offset(0)
-                .range(self.model_uniform_alignment as vk::DeviceSize);
-
-            let model_buffer_infos = [model_buffer_info];
-            let model_set_write = vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_sets[i])
-                .dst_binding(1)
-                .dst_array_element(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)
-                .descriptor_count(1)
-                .buffer_info(&model_buffer_infos);
-
             unsafe {
                 // Update the descriptor sets with the new buffer/binding info
                 self.main_device
                     .get_logical_device()
-                    .update_descriptor_sets(&[vp_set_write, model_set_write], &[]);
+                    .update_descriptor_sets(&[vp_set_write], &[]);
             }
         }
 
@@ -1127,50 +1055,21 @@ impl VulkanRenderer {
         unsafe {
             // Copy VP data
             // Static descriptors are good for data that doesn't change often (e.g., view projection matrix)
-            let size_of_vp = size_of_val(&self.ubo_view_projection);
             let vp_data = self.main_device.get_logical_device().map_memory(
                 self.view_projection_uniform_buffers_memory[image_index as usize],
                 0,
-                size_of_vp as vk::DeviceSize,
+                size_of_val(&self.ubo_view_projection) as vk::DeviceSize,
                 vk::MemoryMapFlags::empty(),
             )?;
             std::ptr::copy_nonoverlapping(
-                &self.ubo_view_projection as *const _ as *const u8,
-                vp_data as *mut u8,
-                size_of_vp,
+                std::ptr::from_ref(&self.ubo_view_projection),
+                vp_data as *mut UBOViewProjection,
+                1,
             );
             self.main_device
                 .get_logical_device()
                 .unmap_memory(self.view_projection_uniform_buffers_memory[image_index as usize]);
-
-            // Copy model data
-            for mesh_index in 0..self.mesh_list.len() {
-                let model_ptr: *mut UBOModel = self
-                    .model_transfer_space
-                    .add(mesh_index * self.model_uniform_alignment)
-                    as *mut UBOModel;
-                // Copy operation
-                *model_ptr = *self.mesh_list[mesh_index].get_ubo_model();
-            }
-
-            // map the list of model data
-            let size_of_models = self.model_uniform_alignment * self.mesh_list.len();
-            let model_data_ptr = self.main_device.get_logical_device().map_memory(
-                self.model_dynamic_uniform_buffers_memory[image_index as usize],
-                0,
-                size_of_models as vk::DeviceSize,
-                vk::MemoryMapFlags::empty(),
-            )?;
-            std::ptr::copy_nonoverlapping(
-                self.model_transfer_space as *const u8,
-                model_data_ptr as *mut u8,
-                size_of_models,
-            );
-            self.main_device
-                .get_logical_device()
-                .unmap_memory(self.model_dynamic_uniform_buffers_memory[image_index as usize]);
         }
-
         Ok(())
     }
 
@@ -1312,7 +1211,7 @@ impl VulkanRenderer {
         Ok(shader_module)
     }
 
-    fn record_commands(&mut self) -> anyhow::Result<()> {
+    fn record_commands(&mut self, current_image_index: usize) -> anyhow::Result<()> {
         // information about how to begin a render pass
         let mut clear_values = [vk::ClearValue::default()];
         clear_values[0].color = vk::ClearColorValue {
@@ -1326,76 +1225,76 @@ impl VulkanRenderer {
 
         let logical_device = self.main_device.get_logical_device();
 
-        for (command_buffer_index, command_buffer) in
-            self.command_buffers.iter().copied().enumerate()
-        {
-            // command_buffer is a wrapper around a pointer (handle)
-            unsafe {
-                render_pass_begin_info.framebuffer =
-                    self.swapchain_framebuffers[command_buffer_index];
+        // command_buffer is a wrapper around a pointer (handle)
+        unsafe {
+            render_pass_begin_info.framebuffer = self.swapchain_framebuffers[current_image_index];
+            let command_buffer = self.command_buffers[current_image_index];
 
-                // start recording commands to the command buffer
-                logical_device
-                    .begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())?;
+            // start recording commands to the command buffer
+            logical_device
+                .begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())?;
 
-                logical_device.cmd_begin_render_pass(
+            logical_device.cmd_begin_render_pass(
+                command_buffer,
+                &render_pass_begin_info,
+                vk::SubpassContents::INLINE,
+            );
+
+            // bind pipeline to be used in render pass
+            logical_device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.graphics_pipeline,
+            );
+
+            for (mesh_index, mesh) in self.mesh_list.iter().enumerate() {
+                logical_device.cmd_bind_vertex_buffers(
                     command_buffer,
-                    &render_pass_begin_info,
-                    vk::SubpassContents::INLINE,
+                    0,
+                    // buffer to bind
+                    &[mesh.get_vertex_buffer()],
+                    // offsets into buffers being bound
+                    &[0 as vk::DeviceSize],
                 );
 
-                // bind pipeline to be used in render pass
-                logical_device.cmd_bind_pipeline(
+                // only one index buffer, but it can be used for many vertex buffers
+                logical_device.cmd_bind_index_buffer(
+                    command_buffer,
+                    mesh.get_index_buffer(),
+                    0,
+                    vk::IndexType::UINT32,
+                );
+
+                let model_bytes = std::slice::from_raw_parts(
+                    self.mesh_list[mesh_index].get_model() as *const Model as *const u8,
+                    size_of::<Model>(),
+                );
+
+                logical_device.cmd_push_constants(
+                    command_buffer,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    &model_bytes,
+                );
+
+                logical_device.cmd_bind_descriptor_sets(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    self.graphics_pipeline,
+                    self.pipeline_layout,
+                    0,
+                    &[self.descriptor_sets[current_image_index]],
+                    &[],
                 );
 
-                for (mesh_index, mesh) in self.mesh_list.iter().enumerate() {
-                    logical_device.cmd_bind_vertex_buffers(
-                        command_buffer,
-                        0,
-                        // buffer to bind
-                        &[mesh.get_vertex_buffer()],
-                        // offsets into buffers being bound
-                        &[0 as vk::DeviceSize],
-                    );
-
-                    // only one index buffer, but it can be used for many vertex buffers
-                    logical_device.cmd_bind_index_buffer(
-                        command_buffer,
-                        mesh.get_index_buffer(),
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-
-                    let dynamic_offset = (self.model_uniform_alignment * mesh_index) as u32;
-
-                    logical_device.cmd_bind_descriptor_sets(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        self.pipeline_layout,
-                        0,
-                        &[self.descriptor_sets[command_buffer_index]],
-                        &[dynamic_offset],
-                    );
-
-                    // Execute pipeline
-                    logical_device.cmd_draw_indexed(
-                        command_buffer,
-                        mesh.get_index_count(),
-                        1,
-                        0,
-                        0,
-                        0,
-                    );
-                }
-
-                logical_device.cmd_end_render_pass(command_buffer);
-
-                // stop recording to the command buffer
-                logical_device.end_command_buffer(command_buffer)?;
+                // Execute pipeline
+                logical_device.cmd_draw_indexed(command_buffer, mesh.get_index_count(), 1, 0, 0, 0);
             }
+
+            logical_device.cmd_end_render_pass(command_buffer);
+
+            // stop recording to the command buffer
+            logical_device.end_command_buffer(command_buffer)?;
         }
 
         Ok(())
@@ -1411,13 +1310,6 @@ impl Drop for VulkanRenderer {
             // wait until no actions being run on the device before destroying
             logical_device.device_wait_idle().unwrap();
 
-            let layout = Layout::from_size_align(
-                self.model_uniform_alignment * MAX_OBJECTS,
-                self.model_uniform_alignment,
-            )
-            .unwrap();
-            dealloc(self.model_transfer_space as *mut u8, layout);
-
             logical_device.destroy_descriptor_pool(self.descriptor_pool, None);
             logical_device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
 
@@ -1426,12 +1318,6 @@ impl Drop for VulkanRenderer {
             }
             for uniform_buffer_memory in self.view_projection_uniform_buffers_memory.iter() {
                 logical_device.free_memory(*uniform_buffer_memory, None);
-            }
-            for model_buffer in self.model_dynamic_uniform_buffers.iter() {
-                logical_device.destroy_buffer(*model_buffer, None);
-            }
-            for model_buffer_memory in self.model_dynamic_uniform_buffers_memory.iter() {
-                logical_device.free_memory(*model_buffer_memory, None);
             }
 
             for mesh in self.mesh_list.iter_mut() {

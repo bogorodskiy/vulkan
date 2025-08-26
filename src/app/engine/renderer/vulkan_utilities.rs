@@ -23,11 +23,11 @@ pub struct UBOViewProjection {
 
 // Uniform buffer object model
 #[derive(Copy, Clone)]
-pub struct UBOModel {
+pub struct Model {
     model: na::Matrix4<f32>,
 }
 
-impl UBOModel {
+impl Model {
     pub fn default() -> Self {
         Self {
             model: na::Matrix4::identity(),
