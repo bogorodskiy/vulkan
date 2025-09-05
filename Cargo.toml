@@ -1,16 +1,17 @@
 [package]
 name = "vulkan"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 ash = "0.38.0"
 ash-window = "0.13.0"
-tracing-subscriber = "0.3.19"
-winit = "0.30.11"
-anyhow = "1.0.98"
-nalgebra = "0.33.2"
+tracing-subscriber = "0.3.20"
+winit = "0.30.12"
+anyhow = "1.0.99"
+nalgebra = "0.34.0"
 memoffset = "0.9.1"
+image = "0.25.8"
 
 [profile.dev]
 opt-level = 0   # No optimizations (default for dev)
