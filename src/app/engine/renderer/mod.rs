@@ -51,6 +51,11 @@ pub struct VulkanRenderer {
     swapchain_image_format: vk::Format,
     swapchain_extent: vk::Extent2D,
 
+    depth_format: vk::Format,
+    depth_buffer_image: vk::Image,
+    depth_buffer_image_memory: vk::DeviceMemory,
+    depth_buffer_image_view: vk::ImageView,
+
     // Descriptors
     descriptor_set_layout: vk::DescriptorSetLayout,
     push_constant_range: vk::PushConstantRange,
@@ -138,6 +143,10 @@ impl VulkanRenderer {
                 draw_fences: Default::default(),
                 swapchain_image_format: vk::Format::UNDEFINED,
                 swapchain_extent: Default::default(),
+                depth_format: Default::default(),
+                depth_buffer_image: Default::default(),
+                depth_buffer_image_memory: Default::default(),
+                depth_buffer_image_view: Default::default(),
                 descriptor_set_layout: Default::default(),
                 push_constant_range: Default::default(),
                 descriptor_pool: Default::default(),
@@ -159,6 +168,7 @@ impl VulkanRenderer {
             result.create_and_set_logical_device()?;
             result.create_and_set_swapchain_device()?;
             result.create_and_set_swapchain()?;
+            result.create_depth_buffer_image()?;
             result.create_render_pass()?;
             result.create_descriptor_set_layout()?;
             result.create_push_constant_range()?;
@@ -501,59 +511,64 @@ impl VulkanRenderer {
     }
 
     fn create_scene_objects(&mut self) -> anyhow::Result<()> {
-        let left_rect_point_1 = na::Vector3::new(-0.4, 0.4, 0.0);
-        let left_rect_point_2 = na::Vector3::new(-0.4, -0.4, 0.0);
-        let left_rect_point_3 = na::Vector3::new(0.4, -0.4, 0.0);
-        let left_rect_point_4 = na::Vector3::new(0.4, 0.4, 0.0);
+        let first_rect_point_1 = na::Vector3::new(-0.4, 0.4, 0.0);
+        let first_rect_point_2 = na::Vector3::new(-0.4, -0.4, 0.0);
+        let first_rect_point_3 = na::Vector3::new(0.4, -0.4, 0.0);
+        let first_rect_point_4 = na::Vector3::new(0.4, 0.4, 0.0);
 
-        let right_rect_point_1 = na::Vector3::new(-0.25, 0.6, 0.0);
-        let right_rect_point_2 = na::Vector3::new(-0.25, -0.6, 0.0);
-        let right_rect_point_3 = na::Vector3::new(0.25, -0.6, 0.0);
-        let right_rect_point_4 = na::Vector3::new(0.25, 0.6, 0.0);
+        let second_rect_point_1 = na::Vector3::new(-0.25, 0.6, 0.0);
+        let second_rect_point_2 = na::Vector3::new(-0.25, -0.6, 0.0);
+        let second_rect_point_3 = na::Vector3::new(0.25, -0.6, 0.0);
+        let second_rect_point_4 = na::Vector3::new(0.25, 0.6, 0.0);
 
-        let color_1 = na::Vector3::new(1.0, 0.0, 0.0);
-        let color_2 = na::Vector3::new(0.0, 1.0, 0.0);
-        let color_3 = na::Vector3::new(0.0, 0.0, 1.0);
-        let color_4 = na::Vector3::new(1.0, 1.0, 0.0);
+        let first_rect_color_1 = na::Vector3::new(1.0, 0.0, 0.0);
+        let first_rect_color_2 = na::Vector3::new(1.0, 0.0, 0.0);
+        let first_rect_color_3 = na::Vector3::new(1.0, 0.0, 0.0);
+        let first_rect_color_4 = na::Vector3::new(1.0, 0.0, 0.0);
 
-        let left_rect_vertices: Vec<vertex::Vertex> = vec![
-            vertex::Vertex::new(left_rect_point_1, color_1),
-            vertex::Vertex::new(left_rect_point_2, color_2),
-            vertex::Vertex::new(left_rect_point_3, color_3),
-            vertex::Vertex::new(left_rect_point_4, color_4),
+        let second_rect_color_1 = na::Vector3::new(0.0, 0.0, 1.0);
+        let second_rect_color_2 = na::Vector3::new(0.0, 0.0, 1.0);
+        let second_rect_color_3 = na::Vector3::new(0.0, 0.0, 1.0);
+        let second_rect_color_4 = na::Vector3::new(0.0, 0.0, 1.0);
+
+        let first_rect_vertices: Vec<vertex::Vertex> = vec![
+            vertex::Vertex::new(first_rect_point_1, first_rect_color_1),
+            vertex::Vertex::new(first_rect_point_2, first_rect_color_2),
+            vertex::Vertex::new(first_rect_point_3, first_rect_color_3),
+            vertex::Vertex::new(first_rect_point_4, first_rect_color_4),
         ];
 
-        let right_rect_vertices: Vec<vertex::Vertex> = vec![
-            vertex::Vertex::new(right_rect_point_1, color_1),
-            vertex::Vertex::new(right_rect_point_2, color_2),
-            vertex::Vertex::new(right_rect_point_3, color_3),
-            vertex::Vertex::new(right_rect_point_4, color_4),
+        let second_rect_vertices: Vec<vertex::Vertex> = vec![
+            vertex::Vertex::new(second_rect_point_1, second_rect_color_1),
+            vertex::Vertex::new(second_rect_point_2, second_rect_color_2),
+            vertex::Vertex::new(second_rect_point_3, second_rect_color_3),
+            vertex::Vertex::new(second_rect_point_4, second_rect_color_4),
         ];
 
         let indices: Vec<u32> = vec![0, 1, 2, 2, 3, 0];
 
-        let left_mesh = mesh::Mesh::new(
+        let first_mesh = mesh::Mesh::new(
             self.main_device.get_logical_device(),
             self.main_device.physical_device,
             &self.instance,
             self.graphics_queue,
             self.graphics_command_pool,
-            left_rect_vertices.as_slice(),
+            first_rect_vertices.as_slice(),
             indices.as_slice(),
         )?;
 
-        let right_mesh = mesh::Mesh::new(
+        let second_mesh = mesh::Mesh::new(
             self.main_device.get_logical_device(),
             self.main_device.physical_device,
             &self.instance,
             self.graphics_queue,
             self.graphics_command_pool,
-            right_rect_vertices.as_slice(),
+            second_rect_vertices.as_slice(),
             indices.as_slice(),
         )?;
 
-        self.mesh_list.push(left_mesh);
-        self.mesh_list.push(right_mesh);
+        self.mesh_list.push(first_mesh);
+        self.mesh_list.push(second_mesh);
 
         Ok(())
     }
@@ -645,6 +660,33 @@ impl VulkanRenderer {
     }
 
     fn create_render_pass(&mut self) -> anyhow::Result<()> {
+        let color_attachment = vk::AttachmentDescription::default()
+            .format(self.swapchain_image_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+        let depth_attachment = vk::AttachmentDescription::default()
+            .format(self.depth_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let attachments = [color_attachment, depth_attachment];
+
+        let color_attachment_ref = vk::AttachmentReference::default()
+            .attachment(0)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let depth_attachment_ref = vk::AttachmentReference::default()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
         // Framebuffer data will be stored as an image, but images can be given different data layouts
         // to give optimal use for certain operations
 
@@ -676,20 +718,11 @@ impl VulkanRenderer {
         unsafe {
             self.render_pass = self.main_device.get_logical_device().create_render_pass(
                 &vk::RenderPassCreateInfo::default()
-                    .attachments(&[vk::AttachmentDescription::default()
-                        .format(self.swapchain_image_format)
-                        .samples(vk::SampleCountFlags::TYPE_1)
-                        .load_op(vk::AttachmentLoadOp::CLEAR)
-                        .store_op(vk::AttachmentStoreOp::STORE)
-                        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                        .initial_layout(vk::ImageLayout::UNDEFINED)
-                        .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)])
+                    .attachments(&attachments)
                     .subpasses(&[vk::SubpassDescription::default()
                         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-                        .color_attachments(&[vk::AttachmentReference::default()
-                            .attachment(0)
-                            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)])])
+                        .color_attachments(&[color_attachment_ref])
+                        .depth_stencil_attachment(&depth_attachment_ref)])
                     .dependencies(&subpass_dependencies),
                 None,
             )?;
@@ -846,10 +879,14 @@ impl VulkanRenderer {
                                     .alpha_blend_op(vk::BlendOp::ADD)])
                                 .logic_op_enable(false),
                         )
-                        // .depth_stencil_state(
-                        //     // TODO: implement later
-                        //     &vk::PipelineDepthStencilStateCreateInfo::default(),
-                        // )
+                        .depth_stencil_state(
+                            &vk::PipelineDepthStencilStateCreateInfo::default()
+                                .depth_test_enable(true)
+                                .depth_write_enable(true)
+                                .depth_compare_op(vk::CompareOp::LESS)
+                                .depth_bounds_test_enable(false)
+                                .stencil_test_enable(false),
+                        )
                         // .dynamic_state(
                         //     &vk::PipelineDynamicStateCreateInfo::default()
                         //         .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]),
@@ -875,13 +912,44 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    fn create_depth_buffer_image(&mut self) -> anyhow::Result<()> {
+        self.depth_format = self.choose_supported_format(
+            &[
+                vk::Format::D32_SFLOAT_S8_UINT, // With stencil buffer support (currently, stencil buffer is not used)
+                vk::Format::D32_SFLOAT,
+                vk::Format::D24_UNORM_S8_UINT,
+            ],
+            vk::ImageTiling::OPTIMAL,
+            vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT,
+        )?;
+
+        let mut depth_buffer_image_memory: vk::DeviceMemory = vk::DeviceMemory::default();
+
+        self.depth_buffer_image = self.create_image(
+            self.swapchain_extent.width,
+            self.swapchain_extent.height,
+            self.depth_format,
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            &mut depth_buffer_image_memory,
+        )?;
+        self.depth_buffer_image_view = Self::create_image_view(
+            self.main_device.get_logical_device(),
+            self.depth_buffer_image,
+            self.depth_format,
+            vk::ImageAspectFlags::DEPTH,
+        )?;
+        Ok(())
+    }
+
     fn create_framebuffers(&mut self) -> anyhow::Result<()> {
         for swapchain_image in self.swapchain_images.iter() {
             unsafe {
                 let frame_buffer = self.main_device.get_logical_device().create_framebuffer(
                     &vk::FramebufferCreateInfo::default()
                         .render_pass(self.render_pass) // render pass layout Framebuffer will be used with
-                        .attachments(&[swapchain_image.image_view])
+                        .attachments(&[swapchain_image.image_view, self.depth_buffer_image_view])
                         .width(self.swapchain_extent.width)
                         .height(self.swapchain_extent.height)
                         .layers(1),
@@ -1088,6 +1156,64 @@ impl VulkanRenderer {
         }
     }
 
+    fn create_image(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        image_tiling: vk::ImageTiling,
+        usage_flags: vk::ImageUsageFlags,
+        memory_property_flags: vk::MemoryPropertyFlags,
+        out_image_memory: &mut vk::DeviceMemory,
+    ) -> anyhow::Result<vk::Image> {
+        let image_create_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .tiling(image_tiling)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .usage(usage_flags)
+            .extent(vk::Extent3D::default().width(width).height(height).depth(1))
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        unsafe {
+            // It's just a concept of an image. There's no device memory holding any image.
+            let image = self
+                .main_device
+                .get_logical_device()
+                .create_image(&image_create_info, None)?;
+
+            let memory_requirements = self
+                .main_device
+                .get_logical_device()
+                .get_image_memory_requirements(image);
+
+            let memory_type_index = VulkanUtilities::find_memory_type_index(
+                &self.instance,
+                self.main_device.physical_device,
+                memory_requirements.memory_type_bits,
+                memory_property_flags,
+            )?;
+            let memory = self.main_device.get_logical_device().allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(memory_requirements.size)
+                    .memory_type_index(memory_type_index),
+                None,
+            )?;
+
+            *out_image_memory = memory;
+
+            // Connect memory to image
+            self.main_device
+                .get_logical_device()
+                .bind_image_memory(image, memory, 0)?;
+
+            Ok(image)
+        }
+    }
+
     fn create_image_view(
         logical_device: &ash::Device,
         image: vk::Image,
@@ -1199,6 +1325,35 @@ impl VulkanRenderer {
         Ok(result)
     }
 
+    fn choose_supported_format(
+        &self,
+        formats: &[vk::Format],
+        tiling: vk::ImageTiling,
+        feature_flags: vk::FormatFeatureFlags,
+    ) -> anyhow::Result<vk::Format> {
+        for &format in formats.iter() {
+            unsafe {
+                let properties = self.instance.get_physical_device_format_properties(
+                    self.main_device.physical_device,
+                    format,
+                );
+                if tiling == vk::ImageTiling::LINEAR
+                    && (properties.linear_tiling_features & feature_flags) == feature_flags
+                {
+                    return Ok(format);
+                }
+
+                if tiling == vk::ImageTiling::OPTIMAL
+                    && (properties.optimal_tiling_features & feature_flags) == feature_flags
+                {
+                    return Ok(format);
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("Failed to find a matching format"))?
+    }
+
     fn create_shader_module(&self, code: &[u8]) -> anyhow::Result<vk::ShaderModule> {
         let mut code = io::Cursor::new(code);
         let code = ash::util::read_spv(&mut code)?;
@@ -1213,9 +1368,13 @@ impl VulkanRenderer {
 
     fn record_commands(&mut self, current_image_index: usize) -> anyhow::Result<()> {
         // information about how to begin a render pass
-        let mut clear_values = [vk::ClearValue::default()];
+        let mut clear_values = [vk::ClearValue::default(), vk::ClearValue::default()];
         clear_values[0].color = vk::ClearColorValue {
             float32: [0.6, 0.65, 0.4, 1.0],
+        };
+        clear_values[1].depth_stencil = vk::ClearDepthStencilValue {
+            depth: 1.0,
+            stencil: 0,
         };
 
         let mut render_pass_begin_info = vk::RenderPassBeginInfo::default()
@@ -1309,6 +1468,10 @@ impl Drop for VulkanRenderer {
         unsafe {
             // wait until no actions being run on the device before destroying
             logical_device.device_wait_idle().unwrap();
+
+            logical_device.destroy_image_view(self.depth_buffer_image_view, None);
+            logical_device.destroy_image(self.depth_buffer_image, None);
+            logical_device.free_memory(self.depth_buffer_image_memory, None);
 
             logical_device.destroy_descriptor_pool(self.descriptor_pool, None);
             logical_device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);

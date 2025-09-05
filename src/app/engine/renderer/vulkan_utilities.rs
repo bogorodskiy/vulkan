@@ -63,25 +63,12 @@ impl VulkanUtilities {
 
             let memory_requirements = parameters.device.get_buffer_memory_requirements(buffer);
 
-            let memory_properties = parameters
-                .vk_instance
-                .get_physical_device_memory_properties(parameters.physical_device);
-
-            const INDEX_NONE: i32 = -1;
-            let mut memory_type_index = INDEX_NONE;
-            for i in 0..memory_properties.memory_type_count {
-                let is_allowed = memory_requirements.memory_type_bits & (1 << i) != 0;
-                let is_desired = memory_properties.memory_types[i as usize]
-                    .property_flags
-                    .contains(parameters.buffer_properties);
-                if is_allowed && is_desired {
-                    memory_type_index = i as i32;
-                    break;
-                }
-            }
-            if memory_type_index == INDEX_NONE {
-                return Err(anyhow::anyhow!("Failed to find suitable memory type"));
-            }
+            let memory_type_index = Self::find_memory_type_index(
+                &parameters.vk_instance,
+                parameters.physical_device,
+                memory_requirements.memory_type_bits,
+                parameters.buffer_properties,
+            )?;
 
             let memory_alloc_info = vk::MemoryAllocateInfo::default()
                 .allocation_size(memory_requirements.size)
@@ -150,5 +137,36 @@ impl VulkanUtilities {
         }
 
         Ok(())
+    }
+
+    pub fn find_memory_type_index(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        type_bits: u32,
+        prop_flags: vk::MemoryPropertyFlags,
+    ) -> anyhow::Result<u32> {
+        const INDEX_NONE: i32 = -1;
+        let mut memory_type_index = INDEX_NONE;
+
+        unsafe {
+            let memory_properties = instance.get_physical_device_memory_properties(physical_device);
+
+            for i in 0..memory_properties.memory_type_count {
+                let is_allowed = type_bits & (1 << i) != 0;
+                let is_desired = memory_properties.memory_types[i as usize]
+                    .property_flags
+                    .contains(prop_flags);
+                if is_allowed && is_desired {
+                    memory_type_index = i as i32;
+                    break;
+                }
+            }
+        }
+
+        if memory_type_index == INDEX_NONE {
+            return Err(anyhow::anyhow!("Failed to find suitable memory type"));
+        }
+
+        Ok(memory_type_index as u32)
     }
 }
