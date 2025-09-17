@@ -97,23 +97,9 @@ impl VulkanUtilities {
         buffer_size: vk::DeviceSize,
     ) -> anyhow::Result<()> {
         // Command buffer to hold the transfer commands
+        let transfer_command_buffer = Self::begin_command_buffer(device, transfer_command_pool)?;
+
         unsafe {
-            let transfer_command_buffer = *device
-                .allocate_command_buffers(
-                    &vk::CommandBufferAllocateInfo::default()
-                        .level(vk::CommandBufferLevel::PRIMARY)
-                        .command_pool(transfer_command_pool)
-                        .command_buffer_count(1),
-                )?
-                .first() // requested one buffer, so we're sure there's a first element
-                .unwrap();
-
-            device.begin_command_buffer(
-                transfer_command_buffer,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-
             device.cmd_copy_buffer(
                 transfer_command_buffer,
                 src_buffer,
@@ -123,19 +109,173 @@ impl VulkanUtilities {
                     .dst_offset(0)
                     .size(buffer_size)],
             );
-
-            device.end_command_buffer(transfer_command_buffer)?;
-
-            device.queue_submit(
-                transfer_queue,
-                &[vk::SubmitInfo::default().command_buffers(&[transfer_command_buffer])],
-                vk::Fence::null(),
-            )?;
-            device.queue_wait_idle(transfer_queue)?;
-
-            device.free_command_buffers(transfer_command_pool, &[transfer_command_buffer]);
         }
 
+        Self::end_and_submit_command_buffer(
+            device,
+            transfer_command_pool,
+            transfer_queue,
+            transfer_command_buffer,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn copy_image_buffer(
+        device: &ash::Device,
+        transfer_queue: vk::Queue,
+        transfer_command_pool: vk::CommandPool,
+        src_buffer: vk::Buffer,
+        dst_image: vk::Image,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<()> {
+        let transfer_command_buffer = Self::begin_command_buffer(device, transfer_command_pool)?;
+
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                transfer_command_buffer,
+                src_buffer,
+                dst_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[vk::BufferImageCopy::default()
+                    .buffer_offset(0)
+                    .buffer_row_length(0) // for data spacing
+                    .buffer_image_height(0) // for data spacing
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(0)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    )
+                    .image_offset(vk::Offset3D::default()) // 0, 0, 0
+                    .image_extent(vk::Extent3D::default().width(width).height(height).depth(1))],
+            );
+        }
+
+        Self::end_and_submit_command_buffer(
+            device,
+            transfer_command_pool,
+            transfer_queue,
+            transfer_command_buffer,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn transition_image_layout(
+        device: &ash::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        image: vk::Image,
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+    ) -> anyhow::Result<()> {
+        let command_buffer = Self::begin_command_buffer(device, command_pool)?;
+
+        let mut image_memory_barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(old_layout)
+            .new_layout(new_layout)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+
+        let mut src_stage = vk::PipelineStageFlags::empty();
+        let mut dst_stage = vk::PipelineStageFlags::empty();
+
+        // if transitioning from new image to image ready to receive data...
+        if old_layout == vk::ImageLayout::UNDEFINED
+            && new_layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL
+        {
+            // memory access stage transition must after...
+            image_memory_barrier.src_access_mask = vk::AccessFlags::empty();
+            // memory access stage transition must before...
+            image_memory_barrier.dst_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+
+            src_stage = vk::PipelineStageFlags::TOP_OF_PIPE;
+            dst_stage = vk::PipelineStageFlags::TRANSFER;
+        }
+        // if transitioning from transfer destination to shader readable...
+        else if old_layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL
+            && new_layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+        {
+            image_memory_barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+            image_memory_barrier.dst_access_mask = vk::AccessFlags::SHADER_READ;
+
+            src_stage = vk::PipelineStageFlags::TRANSFER;
+            dst_stage = vk::PipelineStageFlags::FRAGMENT_SHADER;
+        }
+
+        unsafe {
+            // first two stage flags match to Src and Dst access mask
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[image_memory_barrier],
+            );
+        }
+
+        Self::end_and_submit_command_buffer(device, command_pool, queue, command_buffer)?;
+
+        Ok(())
+    }
+
+    fn begin_command_buffer(
+        device: &ash::Device,
+        command_pool: vk::CommandPool,
+    ) -> anyhow::Result<vk::CommandBuffer> {
+        // Command buffer to hold the transfer commands
+        unsafe {
+            let command_buffer = *device
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_pool(command_pool)
+                        .command_buffer_count(1),
+                )?
+                .first() // requested one buffer, so we're sure there's a first element
+                .unwrap();
+
+            device.begin_command_buffer(
+                command_buffer,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            Ok(command_buffer)
+        }
+    }
+
+    fn end_and_submit_command_buffer(
+        device: &ash::Device,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+        command_buffer: vk::CommandBuffer,
+    ) -> anyhow::Result<()> {
+        unsafe {
+            device.end_command_buffer(command_buffer)?;
+
+            device.queue_submit(
+                queue,
+                &[vk::SubmitInfo::default().command_buffers(&[command_buffer])],
+                vk::Fence::null(),
+            )?;
+            device.queue_wait_idle(queue)?;
+
+            device.free_command_buffers(command_pool, &[command_buffer]);
+        }
         Ok(())
     }
 

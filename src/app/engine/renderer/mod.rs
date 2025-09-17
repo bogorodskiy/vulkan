@@ -11,6 +11,7 @@ use nalgebra as na;
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::io;
+use std::ops::Add;
 use std::os::raw::c_char;
 use std::sync::Arc;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -24,6 +25,7 @@ use swapchain::{SwapchainDetails, SwapchainImage};
 use vulkan_device::VulkanDevice;
 
 const SHADERS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/shaders/");
+const TEXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/textures/");
 const MAX_FRAME_DRAWS: usize = 2;
 
 pub struct VulkanRenderer {
@@ -70,6 +72,10 @@ pub struct VulkanRenderer {
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
     draw_fences: Vec<vk::Fence>,
+
+    // Assets
+    texture_images: Vec<vk::Image>,
+    texture_image_memory: Vec<vk::DeviceMemory>,
 
     // Pipeline
     graphics_pipeline: vk::Pipeline,
@@ -153,6 +159,8 @@ impl VulkanRenderer {
                 descriptor_sets: Default::default(),
                 view_projection_uniform_buffers: Default::default(),
                 view_projection_uniform_buffers_memory: Default::default(),
+                texture_images: Default::default(),
+                texture_image_memory: Default::default(),
                 graphics_pipeline: Default::default(),
                 pipeline_layout: Default::default(),
                 render_pass: Default::default(),
@@ -570,6 +578,9 @@ impl VulkanRenderer {
         self.mesh_list.push(first_mesh);
         self.mesh_list.push(second_mesh);
 
+        // TODO: test, remove later
+        let first_texture = self.create_texture("grass_1024.png")?;
+
         Ok(())
     }
 
@@ -696,18 +707,26 @@ impl VulkanRenderer {
                 .src_stage_mask(vk::PipelineStageFlags::BOTTOM_OF_PIPE)
                 .src_access_mask(vk::AccessFlags::MEMORY_READ)
                 .dst_subpass(0)
-                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS, // TODO: not set in the course, validation fails without this flag
+                )
                 .dst_access_mask(
                     vk::AccessFlags::COLOR_ATTACHMENT_READ
-                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE, // TODO: not set in the course, validation fails without this flag
                 )
                 .dependency_flags(vk::DependencyFlags::BY_REGION), // TODO: set to null in the course, validate with Vulkan tools
             vk::SubpassDependency::default()
                 .src_subpass(0)
-                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .src_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS, // TODO: not set in the course, validation fails without this flag
+                )
                 .src_access_mask(
                     vk::AccessFlags::COLOR_ATTACHMENT_READ
-                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE, // TODO: not set in the course, validation fails without this flag
                 )
                 .dst_subpass(vk::SUBPASS_EXTERNAL)
                 .dst_stage_mask(vk::PipelineStageFlags::BOTTOM_OF_PIPE)
@@ -794,8 +813,8 @@ impl VulkanRenderer {
             .binding(0) // can bind multiple streams of data, this defines which one
             .stride(size_of::<vertex::Vertex>() as u32) // size of a single vertex object
             .input_rate(vk::VertexInputRate::VERTEX); // How to move between data after each vertex object
-                                                      //     vk::VertexInputRate::VERTEX - move on to the next vertex
-                                                      //     vk::VertexInputRate::INSTANCE - move to a vertex for the next instance
+        //     vk::VertexInputRate::VERTEX - move on to the next vertex
+        //     vk::VertexInputRate::INSTANCE - move to a vertex for the next instance
 
         // How the data for an attribute is defined within a vertex
         let attribute_descriptions = [
@@ -934,6 +953,8 @@ impl VulkanRenderer {
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             &mut depth_buffer_image_memory,
         )?;
+        self.depth_buffer_image_memory = depth_buffer_image_memory;
+
         self.depth_buffer_image_view = Self::create_image_view(
             self.main_device.get_logical_device(),
             self.depth_buffer_image,
@@ -1458,6 +1479,134 @@ impl VulkanRenderer {
 
         Ok(())
     }
+
+    fn create_texture(&mut self, filename: &str) -> anyhow::Result<usize> {
+        let mut image_width = 0;
+        let mut image_height = 0;
+        let mut image_size = vk::DeviceSize::default();
+        let image_data = Self::load_texture_file(
+            filename,
+            &mut image_width,
+            &mut image_height,
+            &mut image_size,
+        )?;
+        //let device = self.main_device.get_logical_device();
+
+        // create a staging buffer to hold loaded data, ready to copy to the device
+        let texture_buffer_parameters = CreateBufferParameters {
+            device: self.main_device.get_logical_device(),
+            physical_device: self.main_device.physical_device,
+            vk_instance: &self.instance,
+            buffer_size: image_size,
+            buffer_usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            buffer_properties: vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT,
+        };
+
+        let texture_buffer_result = VulkanUtilities::create_buffer(texture_buffer_parameters)?;
+
+        unsafe {
+            let texture_data = self.main_device.get_logical_device().map_memory(
+                texture_buffer_result.buffer_memory,
+                0,
+                image_size,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            // TODO: check if cast is correct
+            std::ptr::copy_nonoverlapping(
+                image_data.as_ptr(),
+                texture_data.cast(),
+                image_size as usize,
+            );
+            self.main_device
+                .get_logical_device()
+                .unmap_memory(texture_buffer_result.buffer_memory);
+        }
+
+        let mut texture_memory = vk::DeviceMemory::null();
+        let texture_image = self.create_image(
+            image_width,
+            image_height,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            &mut texture_memory,
+        )?;
+
+        // transition image to be Dst for copy operation
+        VulkanUtilities::transition_image_layout(
+            self.main_device.get_logical_device(),
+            self.graphics_queue,
+            self.graphics_command_pool,
+            texture_image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        )?;
+
+        VulkanUtilities::copy_image_buffer(
+            self.main_device.get_logical_device(),
+            self.graphics_queue,
+            self.graphics_command_pool,
+            texture_buffer_result.buffer,
+            texture_image,
+            image_width,
+            image_height,
+        )?;
+
+        // transition image to be shader readable for shader usage
+        VulkanUtilities::transition_image_layout(
+            self.main_device.get_logical_device(),
+            self.graphics_queue,
+            self.graphics_command_pool,
+            texture_image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        )?;
+
+        self.texture_images.push(texture_image);
+        self.texture_image_memory.push(texture_memory);
+
+        unsafe {
+            self.main_device
+                .get_logical_device()
+                .destroy_buffer(texture_buffer_result.buffer, None);
+            self.main_device
+                .get_logical_device()
+                .free_memory(texture_buffer_result.buffer_memory, None);
+        }
+
+        // return index of the new texture image
+        Ok(self.texture_images.len() - 1)
+    }
+
+    fn load_texture_file(
+        filename: &str,
+        out_width: &mut u32,
+        out_height: &mut u32,
+        out_size: &mut vk::DeviceSize,
+    ) -> anyhow::Result<image::RgbaImage> {
+        let full_path = String::from(TEXTURES_DIR).add(filename);
+        let load_result = std::fs::read(&full_path);
+        if load_result.is_err() {
+            Err(anyhow::anyhow!(
+                "Unable to load texture file: {}",
+                full_path
+            ))?
+        }
+
+        let image_buffer = std::fs::read(full_path)?;
+        // copies image_buffer data
+        let image = image::load_from_memory(&image_buffer)?;
+
+        *out_width = image.width();
+        *out_height = image.height();
+
+        let num_channels = 4;
+        *out_size = (image.width() * image.height() * num_channels) as vk::DeviceSize;
+
+        Ok(image.to_rgba8())
+    }
 }
 
 impl Drop for VulkanRenderer {
@@ -1468,6 +1617,16 @@ impl Drop for VulkanRenderer {
         unsafe {
             // wait until no actions being run on the device before destroying
             logical_device.device_wait_idle().unwrap();
+
+            for texture_image in self.texture_images.iter() {
+                logical_device.destroy_image(*texture_image, None);
+            }
+            self.texture_images.clear();
+
+            for texture_memory in self.texture_image_memory.iter() {
+                logical_device.free_memory(*texture_memory, None);
+            }
+            self.texture_image_memory.clear();
 
             logical_device.destroy_image_view(self.depth_buffer_image_view, None);
             logical_device.destroy_image(self.depth_buffer_image, None);
