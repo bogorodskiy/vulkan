@@ -6,7 +6,6 @@ mod vulkan_device;
 mod vulkan_utilities;
 
 use ash::vk;
-use ash::vk::MAX_EXTENSION_NAME_SIZE;
 use nalgebra as na;
 use std::collections::HashSet;
 use std::ffi::CStr;
@@ -27,6 +26,7 @@ use vulkan_device::VulkanDevice;
 const SHADERS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/shaders/");
 const TEXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/textures/");
 const MAX_FRAME_DRAWS: usize = 2;
+const MAX_OBJECTS: u32 = 20;
 
 pub struct VulkanRenderer {
     // Vulkan components
@@ -58,11 +58,16 @@ pub struct VulkanRenderer {
     depth_buffer_image_memory: vk::DeviceMemory,
     depth_buffer_image_view: vk::ImageView,
 
+    texture_sampler: vk::Sampler,
+
     // Descriptors
     descriptor_set_layout: vk::DescriptorSetLayout,
+    sampler_descriptor_set_layout: vk::DescriptorSetLayout,
     push_constant_range: vk::PushConstantRange,
     descriptor_pool: vk::DescriptorPool,
+    sampler_descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,
+    sampler_descriptor_sets: Vec<vk::DescriptorSet>,
 
     // One buffer per every command buffer
     view_projection_uniform_buffers: Vec<vk::Buffer>,
@@ -76,6 +81,7 @@ pub struct VulkanRenderer {
     // Assets
     texture_images: Vec<vk::Image>,
     texture_image_memory: Vec<vk::DeviceMemory>,
+    texture_image_views: Vec<vk::ImageView>,
 
     // Pipeline
     graphics_pipeline: vk::Pipeline,
@@ -153,14 +159,19 @@ impl VulkanRenderer {
                 depth_buffer_image: Default::default(),
                 depth_buffer_image_memory: Default::default(),
                 depth_buffer_image_view: Default::default(),
+                texture_sampler: Default::default(),
                 descriptor_set_layout: Default::default(),
+                sampler_descriptor_set_layout: Default::default(),
                 push_constant_range: Default::default(),
                 descriptor_pool: Default::default(),
+                sampler_descriptor_pool: Default::default(),
                 descriptor_sets: Default::default(),
+                sampler_descriptor_sets: Default::default(),
                 view_projection_uniform_buffers: Default::default(),
                 view_projection_uniform_buffers_memory: Default::default(),
                 texture_images: Default::default(),
                 texture_image_memory: Default::default(),
+                texture_image_views: Default::default(),
                 graphics_pipeline: Default::default(),
                 pipeline_layout: Default::default(),
                 render_pass: Default::default(),
@@ -178,18 +189,23 @@ impl VulkanRenderer {
             result.create_and_set_swapchain()?;
             result.create_depth_buffer_image()?;
             result.create_render_pass()?;
-            result.create_descriptor_set_layout()?;
+            result.create_descriptor_set_layouts()?;
             result.create_push_constant_range()?;
             result.create_graphics_pipeline()?;
             result.create_framebuffers()?;
             result.create_command_pool()?;
-            result.create_view_projection()?;
-            result.create_scene_objects()?;
             result.create_command_buffers()?;
+            result.create_texture_sampler()?;
             result.create_uniform_buffers()?;
-            result.create_descriptor_pool()?;
+            result.create_descriptor_pools()?;
             result.create_descriptor_sets()?;
             result.create_synchronization_objects()?;
+
+            result.create_view_projection()?;
+            result.create_scene_objects()?;
+
+            // TODO: remove test block
+            let first_texture = result.create_texture("grass_1024.png")?;
 
             Ok(result)
         }
@@ -300,7 +316,7 @@ impl VulkanRenderer {
                         .extension_name
                         .iter()
                         .position(|&c| c == NULL_TERMINATOR)
-                        .unwrap_or(MAX_EXTENSION_NAME_SIZE);
+                        .unwrap_or(vk::MAX_EXTENSION_NAME_SIZE);
                     let chars_from_name = &property.extension_name[..nul_pos];
                     let bytes_from_name: &[u8] = std::slice::from_raw_parts(
                         chars_from_name.as_ptr() as *const u8,
@@ -370,10 +386,13 @@ impl VulkanRenderer {
             let device_properties = self
                 .instance
                 .get_physical_device_properties(physical_device);
+            let device_features = self.instance.get_physical_device_features(physical_device);
             let swapchain_details = self.get_swapchain_details(physical_device)?;
+
             let suitable = queue_family_indices.is_valid()
                 && swapchain_details.is_valid()
-                && device_properties.api_version >= vk::API_VERSION_1_3;
+                && device_properties.api_version >= vk::API_VERSION_1_3
+                && device_features.sampler_anisotropy == vk::TRUE;
             Ok(suitable)
         }
     }
@@ -472,7 +491,8 @@ impl VulkanRenderer {
                 vk::PhysicalDeviceFeatures::default()
                     .fragment_stores_and_atomics(true)
                     .vertex_pipeline_stores_and_atomics(true)
-                    .shader_int64(true),
+                    .shader_int64(true)
+                    .sampler_anisotropy(true),
             );
             device_features2 = device_features2.push_next(&mut vulkan_12_features);
 
@@ -540,20 +560,55 @@ impl VulkanRenderer {
         let second_rect_color_4 = na::Vector3::new(0.0, 0.0, 1.0);
 
         let first_rect_vertices: Vec<vertex::Vertex> = vec![
-            vertex::Vertex::new(first_rect_point_1, first_rect_color_1),
-            vertex::Vertex::new(first_rect_point_2, first_rect_color_2),
-            vertex::Vertex::new(first_rect_point_3, first_rect_color_3),
-            vertex::Vertex::new(first_rect_point_4, first_rect_color_4),
+            vertex::Vertex::new(
+                first_rect_point_1,
+                first_rect_color_1,
+                na::Vector2::new(1.0, 1.0),
+            ),
+            vertex::Vertex::new(
+                first_rect_point_2,
+                first_rect_color_2,
+                na::Vector2::new(1.0, 0.0),
+            ),
+            vertex::Vertex::new(
+                first_rect_point_3,
+                first_rect_color_3,
+                na::Vector2::new(0.0, 0.0),
+            ),
+            vertex::Vertex::new(
+                first_rect_point_4,
+                first_rect_color_4,
+                na::Vector2::new(0.0, 1.0),
+            ),
         ];
 
         let second_rect_vertices: Vec<vertex::Vertex> = vec![
-            vertex::Vertex::new(second_rect_point_1, second_rect_color_1),
-            vertex::Vertex::new(second_rect_point_2, second_rect_color_2),
-            vertex::Vertex::new(second_rect_point_3, second_rect_color_3),
-            vertex::Vertex::new(second_rect_point_4, second_rect_color_4),
+            vertex::Vertex::new(
+                second_rect_point_1,
+                second_rect_color_1,
+                na::Vector2::new(1.0, 1.0),
+            ),
+            vertex::Vertex::new(
+                second_rect_point_2,
+                second_rect_color_2,
+                na::Vector2::new(1.0, 0.0),
+            ),
+            vertex::Vertex::new(
+                second_rect_point_3,
+                second_rect_color_3,
+                na::Vector2::new(0.0, 0.0),
+            ),
+            vertex::Vertex::new(
+                second_rect_point_4,
+                second_rect_color_4,
+                na::Vector2::new(0.0, 1.0),
+            ),
         ];
 
         let indices: Vec<u32> = vec![0, 1, 2, 2, 3, 0];
+
+        // TODO: test, remove later
+        let test_texture_index = self.create_texture("grass_1024.png")?;
 
         let first_mesh = mesh::Mesh::new(
             self.main_device.get_logical_device(),
@@ -563,6 +618,7 @@ impl VulkanRenderer {
             self.graphics_command_pool,
             first_rect_vertices.as_slice(),
             indices.as_slice(),
+            test_texture_index as i32,
         )?;
 
         let second_mesh = mesh::Mesh::new(
@@ -573,13 +629,11 @@ impl VulkanRenderer {
             self.graphics_command_pool,
             second_rect_vertices.as_slice(),
             indices.as_slice(),
+            test_texture_index as i32,
         )?;
 
         self.mesh_list.push(first_mesh);
         self.mesh_list.push(second_mesh);
-
-        // TODO: test, remove later
-        let first_texture = self.create_texture("grass_1024.png")?;
 
         Ok(())
     }
@@ -749,20 +803,41 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn create_descriptor_set_layout(&mut self) -> anyhow::Result<()> {
-        unsafe {
-            let view_projection_layout_binding = vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::VERTEX);
+    fn create_descriptor_set_layouts(&mut self) -> anyhow::Result<()> {
+        // UNIFORM VALUES DESCRIPTOR SET LAYOUT
 
+        let view_projection_layout_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX);
+
+        unsafe {
             self.descriptor_set_layout = self
                 .main_device
                 .get_logical_device()
                 .create_descriptor_set_layout(
                     &vk::DescriptorSetLayoutCreateInfo::default()
                         .bindings(&[view_projection_layout_binding]),
+                    None,
+                )?;
+        }
+
+        // CREATE TEXTURE SAMPLER DESCRIPTOR SET LAYOUT
+
+        let sampler_layout_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+
+        unsafe {
+            self.sampler_descriptor_set_layout = self
+                .main_device
+                .get_logical_device()
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default()
+                        .bindings(&[sampler_layout_binding]),
                     None,
                 )?;
         }
@@ -830,13 +905,22 @@ impl VulkanRenderer {
                 .location(1)
                 .format(vk::Format::R32G32B32_SFLOAT)
                 .offset(memoffset::offset_of!(vertex::Vertex, color) as u32),
+            // TEXTURE
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(2)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(memoffset::offset_of!(vertex::Vertex, texture_coordinates) as u32),
         ];
 
         let logical_device = self.main_device.get_logical_device();
         unsafe {
             self.pipeline_layout = logical_device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&[self.descriptor_set_layout])
+                    .set_layouts(&[
+                        self.descriptor_set_layout,
+                        self.sampler_descriptor_set_layout,
+                    ])
                     .push_constant_ranges(&[self.push_constant_range]),
                 None,
             )?;
@@ -1069,7 +1153,9 @@ impl VulkanRenderer {
     }
 
     // should be created after uniform_buffers
-    fn create_descriptor_pool(&mut self) -> anyhow::Result<()> {
+    fn create_descriptor_pools(&mut self) -> anyhow::Result<()> {
+        // CREATE THE UNIFORM DESCRIPTOR POOL
+
         let pool_sizes = [
             // View projection pools. Sets how many descriptors, not descriptor sets
             vk::DescriptorPoolSize::default()
@@ -1087,6 +1173,32 @@ impl VulkanRenderer {
                 .main_device
                 .get_logical_device()
                 .create_descriptor_pool(&pool_create_info, None)?;
+        }
+
+        // CREATE SAMPLER DESCRIPTOR POOL
+        // Texture sampler pool
+
+        let sampler_pool_sizes = [
+            // View projection pools. Sets how many descriptors, not descriptor sets
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                // Max one texture per object for this demo.
+                // Max num of supported descriptors for samplers (maxDescriptorSetSamplers) is way bigger than maxDescriptorSetUniform buffers.
+                // For example, in the course videos it's 1'048'576 vs 90
+                // Can be optimized with array layers and texture atlasing
+                .descriptor_count(MAX_OBJECTS),
+        ];
+
+        let sampler_pool_create_info = vk::DescriptorPoolCreateInfo::default()
+            // one set per object
+            .max_sets(MAX_OBJECTS)
+            .pool_sizes(&sampler_pool_sizes);
+
+        unsafe {
+            self.sampler_descriptor_pool = self
+                .main_device
+                .get_logical_device()
+                .create_descriptor_pool(&sampler_pool_create_info, None)?;
         }
 
         Ok(())
@@ -1458,12 +1570,17 @@ impl VulkanRenderer {
                     &model_bytes,
                 );
 
+                let descriptor_set_group = [
+                    self.descriptor_sets[current_image_index],
+                    self.sampler_descriptor_sets[mesh.get_texture_index() as usize],
+                ];
+
                 logical_device.cmd_bind_descriptor_sets(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline_layout,
                     0,
-                    &[self.descriptor_sets[current_image_index]],
+                    &descriptor_set_group,
                     &[],
                 );
 
@@ -1480,7 +1597,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn create_texture(&mut self, filename: &str) -> anyhow::Result<usize> {
+    fn create_texture_image(&mut self, filename: &str) -> anyhow::Result<usize> {
         let mut image_width = 0;
         let mut image_height = 0;
         let mut image_size = vk::DeviceSize::default();
@@ -1580,6 +1697,88 @@ impl VulkanRenderer {
         Ok(self.texture_images.len() - 1)
     }
 
+    fn create_texture(&mut self, filename: &str) -> anyhow::Result<usize> {
+        let texture_image_index = self.create_texture_image(filename)?;
+
+        let image_view = Self::create_image_view(
+            self.main_device.get_logical_device(),
+            self.texture_images[texture_image_index],
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageAspectFlags::COLOR,
+        )?;
+        self.texture_image_views.push(image_view);
+
+        let descriptor_index = self.create_texture_descriptor(image_view)?;
+        Ok(descriptor_index)
+    }
+
+    fn create_texture_descriptor(&mut self, texture_image: vk::ImageView) -> anyhow::Result<usize> {
+        let set_layouts = [self.sampler_descriptor_set_layout];
+        let allocate_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(self.sampler_descriptor_pool)
+            .set_layouts(&set_layouts);
+
+        unsafe {
+            let mut descriptor_sets = self
+                .main_device
+                .get_logical_device()
+                .allocate_descriptor_sets(&allocate_info)?;
+
+            self.sampler_descriptor_sets.append(&mut descriptor_sets);
+        }
+
+        let image_infos = [vk::DescriptorImageInfo::default()
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image_view(texture_image)
+            .sampler(self.texture_sampler)];
+
+        let added_sampler_index = self.sampler_descriptor_sets.len() - 1;
+        let descriptor_write = vk::WriteDescriptorSet::default()
+            .dst_set(self.sampler_descriptor_sets[added_sampler_index])
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .image_info(&image_infos);
+
+        unsafe {
+            self.main_device
+                .get_logical_device()
+                .update_descriptor_sets(&[descriptor_write], &[]);
+        }
+
+        Ok(added_sampler_index)
+    }
+
+    fn create_texture_sampler(&mut self) -> anyhow::Result<()> {
+        let sampler_create_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(0.0)
+            .anisotropy_enable(true)
+            .max_anisotropy(16.0)
+            // TODO: check if these are correct (not set in the course)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::NEVER);
+
+        unsafe {
+            self.texture_sampler = self
+                .main_device
+                .get_logical_device()
+                .create_sampler(&sampler_create_info, None)?;
+        }
+
+        Ok(())
+    }
+
     fn load_texture_file(
         filename: &str,
         out_width: &mut u32,
@@ -1618,6 +1817,12 @@ impl Drop for VulkanRenderer {
             // wait until no actions being run on the device before destroying
             logical_device.device_wait_idle().unwrap();
 
+            // destroying descriptor pool will automatically destroy descriptor sets
+            logical_device.destroy_descriptor_pool(self.sampler_descriptor_pool, None);
+            self.sampler_descriptor_sets.clear();
+            logical_device.destroy_descriptor_set_layout(self.sampler_descriptor_set_layout, None);
+            logical_device.destroy_sampler(self.texture_sampler, None);
+
             for texture_image in self.texture_images.iter() {
                 logical_device.destroy_image(*texture_image, None);
             }
@@ -1627,6 +1832,11 @@ impl Drop for VulkanRenderer {
                 logical_device.free_memory(*texture_memory, None);
             }
             self.texture_image_memory.clear();
+
+            for texture_image_view in self.texture_image_views.iter() {
+                logical_device.destroy_image_view(*texture_image_view, None);
+            }
+            self.texture_image_views.clear();
 
             logical_device.destroy_image_view(self.depth_buffer_image_view, None);
             logical_device.destroy_image(self.depth_buffer_image, None);

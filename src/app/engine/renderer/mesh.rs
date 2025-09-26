@@ -5,6 +5,7 @@ use ash::vk;
 
 pub struct Mesh {
     model: Model,
+    texture_index: i32,
     vertex_count: u32,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
@@ -17,6 +18,7 @@ impl Mesh {
     pub fn default() -> Self {
         Self {
             model: Model::default(),
+            texture_index: -1,
             vertex_count: 0,
             vertex_buffer: vk::Buffer::default(),
             vertex_buffer_memory: vk::DeviceMemory::default(),
@@ -34,6 +36,7 @@ impl Mesh {
         transfer_command_pool: vk::CommandPool,
         vertices: &[vertex::Vertex],
         indices: &[u32],
+        texture_index: i32,
     ) -> anyhow::Result<Self> {
         let mut result = Self::default();
 
@@ -57,6 +60,8 @@ impl Mesh {
             indices,
         )?;
 
+        result.texture_index = texture_index;
+
         Ok(result)
     }
 
@@ -74,6 +79,18 @@ impl Mesh {
 
     pub fn get_vertex_count(&self) -> u32 {
         self.vertex_count
+    }
+
+    pub fn get_index_buffer(&self) -> vk::Buffer {
+        self.index_buffer
+    }
+
+    pub fn get_index_count(&self) -> u32 {
+        self.index_count
+    }
+
+    pub fn get_texture_index(&self) -> i32 {
+        self.texture_index
     }
 
     fn create_vertex_buffer(
@@ -149,14 +166,6 @@ impl Mesh {
         }
 
         Ok(true)
-    }
-
-    pub fn get_index_buffer(&self) -> vk::Buffer {
-        self.index_buffer
-    }
-
-    pub fn get_index_count(&self) -> u32 {
-        self.index_count
     }
 
     fn create_index_buffer(
@@ -257,6 +266,7 @@ impl Drop for Mesh {
     fn drop(&mut self) {
         assert_eq!(
             self.vertex_count, 0,
-            "vertex_count should be zero at this point. Make sure 'destroy_vertex_buffer' was successfully called before the dtor");
+            "vertex_count should be zero at this point. Make sure 'destroy_vertex_buffer' was successfully called before the dtor"
+        );
     }
 }
